@@ -56,28 +56,29 @@ def find_all_configs(root: Path) -> Dict[str, Any]:
             
             location = content.get("location")
             deps = []
+            deps_locked={}
             # Flatten requirements
-            for req in content.get("sources", []):
+                
+            for req in content.get("sources_locked", []):
                 name = req.get("name", Path(req["repo"]).name)
                 dep_path = project_root / location / name
                 
+                deps_locked[str(dep_path.relative_to(root))] = {
+                    "name": name,
+                    "repo": req["repo"],
+                    "rev": req["rev"]
+                }
+            for req in content.get("sources", []):
+                name = req.get("name", Path(req["repo"]).name)
+                dep_path = project_root / location / name
+                dep_path_rel=str(dep_path.relative_to(root))
                 deps.append({
                     "name": name,
                     "repo": req["repo"],
                     "rev": req["rev"],
-                    "path": str(dep_path.relative_to(root))
+                    "locked_rev": deps_locked[dep_path_rel]["rev"] if dep_path_rel in deps_locked else None,
+                    "path": dep_path_rel
                 })
-            # # Flatten groups
-            # for group_name, group_reqs in content.get("groups", {}).items():
-            #     for req in group_reqs:
-            #         name = req.get("name", Path(req["repo"]).name)
-            #         dep_path = project_root / location / name
-            #         deps.append({
-            #             "name": name,
-            #             "repo": req["repo"],
-            #             "rev": req["rev"],
-            #             "path": dep_path
-            #         })
             project_root_short = project_root.relative_to(root)
             configs[str(project_root_short)] = {
                 "project_root": str(project_root_short),
