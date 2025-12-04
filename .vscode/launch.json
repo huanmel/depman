@@ -6,12 +6,12 @@
     "configurations": [
     
         {
-            "name": "Python Debugger:dp187_csw",
+            "name": "Python Debugger",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--test-path", "C:\\Users\\ivanm\\Documents\\MATLAB\\EKL\\dp187_ravo\\dp187_csw","--use-cache","True"]
+            "args": ["--test-path", ".","--use-cache","True"]
         }
     ]
 }
