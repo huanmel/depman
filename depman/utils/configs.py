@@ -10,6 +10,11 @@ import yaml  # For manual YAML loads
 from git import Repo, GitCommandError
 from gitman.models import Config
 from itertools import chain
+from rich.console import Console
+from rich.table import Table
+
+from gitman import update as gitman_update
+from tqdm import tqdm
 
 
 
@@ -22,7 +27,7 @@ def timeit(func):
         end_time = time.perf_counter()
         total_time = end_time - start_time
         # first item in the args, ie `args[0]` is `self`
-        print(f'Function: {func.__name__}{args} {kwargs} \nTimeit: {total_time:.4f} sec')
+        print(f'Function: {func.__name__} \nTimeit: {total_time:.4f} sec')
         return result
     return timeit_wrapper
 
@@ -150,7 +155,8 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
     """
     
     repos = {}
-    for repo_path in root.rglob(".git"):
+    paths=[p for p in root.rglob(".git") if p.is_dir()]
+    for repo_path in tqdm(paths, desc="Scanning Git repos",colour="green"):
         if repo_path.is_dir():
             git_root = repo_path.parent
             try:
@@ -300,6 +306,152 @@ Requires: GitPython (git) for precise 'behind_main' checks (compares rev_locked 
 If dep path not in repos or no Git repo, sets behind_main=False.
 """
 
+def print_check_table(
+    configs: Dict[str, Any], git_repos: Dict[str, Any],only_dirty: bool=False, root: Path=Path('.')):
+    # Table for updates
+    table = Table(title="Git deps status", show_header=True,
+                  header_style="bold magenta")
+    cols = ["Dep", "Status", "Uncommitted",
+            "Unpushed", "Update", "Update Main"]
+    for col in cols:
+        table.add_column(col, style="dim", overflow="fold")
+
+    has_updates = False
+    updates_projects = []
+    click.echo(click.style(
+        f"\n=== Git Repos Status (scanned at {git_repos['datetime']}) ===", bold=True))
+
+    for key, val in git_repos["repos"].items():
+        has_updates_repo = val["has_uncommitted"] or val["has_unpushed"] or val["has_update"] or val["has_update_main"]
+
+        if val["has_uncommitted"]:
+            click.echo(click.style(
+                f"⚠️  Repo {key} has uncommitted changes: {val['uncommitted_files']}", fg="yellow"))
+            has_updates_repo = True
+        if val["has_unpushed"]:
+            click.echo(click.style(
+                f"⚠️  Repo {key} has {val['unpushed_count']} unpushed commits", fg="yellow"))
+        if val["has_update"]:
+            details = val["update_details"]
+            click.echo(click.style(
+                f"⚠️  Repo {key} has updates on {details['branch']}@{details['latest_hash'][:7]}:{details.get('datetime')} - {details['message']}", fg="yellow"))
+            updates_projects.append(key)
+        if val["has_update_main"]:
+            details = val["update_details_main"]
+            click.echo(click.style(
+                f"⚠️  Repo {key} has updates on main branch {details['branch']}: {details['latest_hash'][:7]} - {details['message']}", fg="yellow"))
+
+        has_updates = has_updates or has_updates_repo
+        table.add_row(*[
+            key,
+            "⚠️" if has_updates_repo else "✅",
+            "⚠️" if val["has_uncommitted"] else "✅",
+            "⚠️" if val["has_unpushed"] else "✅",
+            "⚠️" if val["has_update"] else "✅",
+            "⚠️" if val["has_update_main"] else "✅"
+        ],  style='bright_green' if not has_updates_repo else 'bright_yellow')
+        # table.add_row(
+        #     key,
+        #     "!" if has_updates_repo else "ok",
+        #     "!" if val["has_uncommitted"] else "ok",
+        #     "!" if val["has_unpushed"] else "ok",
+        #     "!" if val["has_update"] else "ok",
+        #     "!" if val["has_update_main"] else "ok",
+        #     style='bright_green' if not has_updates_repo else 'bright_yellow'
+        # )
+
+    console = Console()
+    console.print(table)
+    if has_updates:
+        click.echo(click.style(
+            "⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
+        click.echo("\n".join(updates_projects))
+        click.echo('apply updates? [yn] ', nl=False)
+        c = click.getchar()
+        click.echo()
+        if c == 'y':
+            click.echo('apply updates')
+            # gitman_update(*updates_projects,root=root)
+            gitman_update(root=root)
+        elif c == 'n':
+            click.echo('Abort!')
+        else:
+            click.echo('Invalid input :(')
+        # for project_root, config in projects:
+        # click.echo(click.style(
+        #     f"\n=== Project: {project_root} ===", bold=True))
+        # print_project_tree(config, project_root)
+
+        # location = project_root / \
+        #     config.content.get("location", "requirements")
+        # all_reqs = get_all_requirements(config, recursive)
+
+        # if not all_reqs:
+        #     click.echo("No requirements found.")
+        #     continue
+
+        # # Table for updates
+        # table = click.table(
+        #     [("Dep", "Status", "Repo")],
+        #     [("", "", "")],  # Header row
+        #     headers=False,
+        #     colalign=("left", "left", "left"),
+        # )
+        # table.add_row(["", "", ""])  # Spacer
+
+        # has_updates = False
+        # for req in all_reqs:
+        #     name = req.get("name", Path(req["repo"]).name)
+        #     repo_url = req["repo"]
+        #     target_rev = req["rev"]
+        #     dep_path = location / name
+
+        #     if not dep_path.exists():
+        #         status = click.style("Not installed", fg="yellow")
+        #         table.add_row([name, status, repo_url])
+        #         continue
+
+        #     try:
+        #         repo = Repo(dep_path)
+        #         repo.remotes.origin.fetch()
+
+        #         current_sha = repo.head.commit.hexsha
+        #         try:
+        #             origin_ref = repo.refs[f"origin/{target_rev}"]
+        #             latest_sha = origin_ref.commit.hexsha
+        #             is_branch = True
+        #         except IndexError:
+        #             latest_sha = repo.rev_parse(target_rev).hexsha
+        #             is_branch = False
+
+        #         short_current = current_sha[:8]
+        #         short_latest = latest_sha[:8]
+
+        #         if current_sha == latest_sha:
+        #             status = click.style("Up to date", fg="green")
+        #         else:
+        #             has_updates = True
+        #             if is_branch:
+        #                 status = click.style(
+        #                     f"Update avail. ({short_current} → {short_latest})", fg="red")
+        #             else:
+        #                 status = click.style(
+        #                     f"Mismatch ({short_latest})", fg="yellow")
+
+        #         table.add_row([name, status, repo_url])
+
+        #     except GitCommandError as e:
+        #         status = click.style(f"Git error ({e})", fg="red")
+        #         table.add_row([name, status, repo_url])
+        #     except KeyError as e:
+        #         status = click.style(f"Missing key ({e})", fg="yellow")
+        #         table.add_row([name, status, repo_url])
+
+        # click.echo(table)
+        # if has_updates:
+        #     click.echo(click.style(
+        #         "⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
+
 def print_list_configs_repos(
     configs: Dict[str, Any], repos: Dict[str, Any],only_dirty: bool=False
 ):
@@ -336,15 +488,21 @@ def print_list_configs_repos(
         sym =  "✅" if is_all_ok else "⚠️"
         
         
-        click.echo(f"{sym}  repo: {repo_path}        branch rev: {repo_info.get('current_branch')} {repo_info.get('rev_short')}")
+        click.echo(f"{sym}  repo: {repo_path}        branch@rev: {repo_info.get('current_branch')}@{repo_info.get('rev_short')}")
         click.echo(f"       datetime: {repo_info.get('commit_info')['datetime']} | message: {repo_info.get('commit_info')['message']}")
         if has_updates_repo:
-            click.echo(click.style(f"         | Has Update: {repo_info.get('has_update')} | Uncommitted: {repo_info.get('has_uncommitted')} | Unpushed: {repo_info.get('has_unpushed')}",fg=msg_upd_style))
+            if repo_info.get('has_uncommitted'):
+                click.echo(click.style(f"         | Has Uncommitted Changes: {repo_info.get('has_uncommitted')} | Files: {', '.join(repo_info.get('uncommitted_files', []))}",fg='bright_yellow'))
+            if repo_info.get('has_unpushed'):
+                click.echo(click.style(f"         | Has Unpushed Commits: {repo_info.get('has_unpushed')} | Count: {repo_info.get('unpushed_count')}",fg='bright_yellow'))
+            if repo_info.get('has_update'):
+                click.echo(click.style(f"         | Update Available: {repo_info.get('has_update')}",fg='yellow'))
+            # click.echo(click.style(f"         | Has Update: {repo_info.get('has_update')} | Uncommitted: {repo_info.get('has_uncommitted')} | Unpushed: {repo_info.get('has_unpushed')}",fg=msg_upd_style))
             if repo_info.get('has_update') and repo_info.get('update_details'):
                 ud = repo_info.get('update_details')
-                click.echo(f"         | Update Details: Branch: {ud.get('branch')} | Latest Hash: {ud.get('latest_hash')} | Datetime: {ud.get('datetime')} | Message: {ud.get('message')}")
+                click.echo(f"         | Update Details: Branch: {ud.get('branch')} | Latest Hash: {ud.get('latest_hash')[:7]} | Datetime: {ud.get('datetime')} | Message: {ud.get('message')}")
         if (not is_rev_matched or not only_dirty):
-            click.echo(click.style(f"         | configs: {repo_info.get('used_in_configs')}",fg=conf_style))
+            click.echo(click.style(f"       configs: {repo_info.get('used_in_configs')}",fg=conf_style))
             click.echo()
         
         # list configs without installations
@@ -354,10 +512,10 @@ def print_list_configs_repos(
     if uninstalled_configs:
         click.echo("⚠️ Configs without installations:")
         for uc in uninstalled_configs:
-            click.echo(click.style(f"  - {uc}", fg="red"))
+            click.echo(click.style(f"  - {uc}", fg="yellow"))
     is_total_ok = is_total_ok and (len(uninstalled_configs) == 0)
     if is_total_ok:
-        click.echo(click.style("✅ All repos are up-to-date and matching installed revisions.", fg="green"))    
+        click.echo(click.style("✅ All repos are up-to-date, installed revisions matching configs.", fg="green"))    
 
     # click.echo("Configs Summary:")
     # for config_path, config_data in configs.get("configs", {}).items():
