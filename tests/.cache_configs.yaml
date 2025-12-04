@@ -1,0 +1,130 @@
+datetime: '2025-10-20 18:56:07'
+configs:
+  .:
+    project_root: .
+    config_file: gitman.yml
+    location: .deps
+    deps:
+      .deps\mbd:
+        name: mbd
+        repo: git@gitlab.com:elitekl/utils/mbd.git
+        rev: main
+        rev_locked: dcaa40c7ab1fec1966aa9854ff08e3def817a661
+        path: .deps\mbd
+      .deps\comps\apps\tcuapp0:
+        name: comps/apps/tcuapp0
+        repo: git@gitlab.com:elitekl/comps/apps/tcuapp0.git
+        rev: main
+        rev_locked: b755e8cc90a438d28d2cefd47550e8afc407f119
+        path: .deps\comps\apps\tcuapp0
+      .deps\comps\drivers\accmprdrvr_tcci:
+        name: comps/drivers/accmprdrvr_tcci
+        repo: git@gitlab.com:elitekl/comps/drivers/accmprdrvr_tcci.git
+        rev: main
+        rev_locked: a391b8b24d9ed1f0243b4374535bb8079e0220fb
+        path: .deps\comps\drivers\accmprdrvr_tcci
+      .deps\comps\drivers\hmidrvrdp187:
+        name: comps/drivers/hmidrvrdp187
+        repo: git@gitlab.com:elitekl/comps/drivers/hmidrvrdp187.git
+        rev: main
+        rev_locked: 7b13c549814b3d63d03da30b865dfd170a0f26fc
+        path: .deps\comps\drivers\hmidrvrdp187
+      .deps\comps\drivers\tmsinfodrvr:
+        name: comps/drivers/tmsinfodrvr
+        repo: git@gitlab.com:elitekl/comps/drivers/tmsinfodrvr.git
+        rev: main
+        rev_locked: 12d70451bf07d7f365c2e5120cb52ea0370fdda5
+        path: .deps\comps\drivers\tmsinfodrvr
+      .deps\comps\drivers\pmpdrvr_fle200:
+        name: comps/drivers/pmpdrvr_fle200
+        repo: git@gitlab.com:elitekl/comps/drivers/pmpdrvr_fle200.git
+        rev: main
+        rev_locked: 9a8ef7c0c69759b2e40f2165836b3e871a6e197f
+        path: .deps\comps\drivers\pmpdrvr_fle200
+      .deps\comps\drivers\vlvdrvr_3rd:
+        name: comps/drivers/vlvdrvr_3rd
+        repo: git@gitlab.com:elitekl/comps/drivers/vlvdrvr_3rd.git
+        rev: main
+        rev_locked: c0167c45daea92f0af273858db7f4f6f18a8fa39
+        path: .deps\comps\drivers\vlvdrvr_3rd
+      .deps\comps\drivers\voltvaldrvr:
+        name: comps/drivers/voltvaldrvr
+        repo: git@gitlab.com:elitekl/comps/drivers/voltvaldrvr.git
+        rev: main
+        rev_locked: 3a87dc5b24167772279c1c7d0547a3ba5497fa05
+        path: .deps\comps\drivers\voltvaldrvr
+      .deps\comps\drivers\fandrvr:
+        name: comps/drivers/fandrvr
+        repo: git@gitlab.com:elitekl/comps/drivers/fandrvr.git
+        rev: main
+        rev_locked: a26bdc0fc7023c64263735785c10c4fe43141f7a
+        path: .deps\comps\drivers\fandrvr
+      .deps\dp187_cal:
+        name: dp187_cal
+        repo: git@gitlab.com:elitekl/projs/dp187/dp187_cal.git
+        rev: main
+        rev_locked: b58392c4265acfa55fdbe028a00ca4e830375437
+        path: .deps\dp187_cal
+      .deps\data\dbc\tms\tms_test_control:
+        name: data/dbc/tms/tms_test_control
+        repo: git@gitlab.com:elitekl/data/dbc/tms/tms_test_control.git
+        rev: main
+        rev_locked: bf693361642636ca7865e466419aaf6ccb9e3778
+        path: .deps\data\dbc\tms\tms_test_control
+      .deps\data\ldf\dp187_lin_ldf:
+        name: data/ldf/dp187_lin_ldf
+        repo: git@gitlab.com:elitekl/data/ldf/dp187_lin_ldf.git
+        rev: main
+        rev_locked: 0e48119519c0e8ed0f6f37596d6e32f88c6a17de
+        path: .deps\data\ldf\dp187_lin_ldf
+      .deps\data\ldf\borgwarner_hvch:
+        name: data/ldf/borgwarner_hvch
+        repo: git@gitlab.com:elitekl/data/ldf/borgwarner_hvch.git
+        rev: main
+        rev_locked: 316ff3b231961f9fe7c8a53878b417b4be67b936
+        path: .deps\data\ldf\borgwarner_hvch
+      .deps\data\dbc\calatherm_tcu_vcu:
+        name: data/dbc/calatherm_tcu_vcu
+        repo: git@gitlab.com:elitekl/data/dbc/calatherm_tcu_vcu.git
+        rev: main
+        rev_locked: 9796e80c5876f13f8788c40f0224aa7069c28120
+        path: .deps\data\dbc\calatherm_tcu_vcu
+  .deps\mbd:
+    project_root: .deps\mbd
+    config_file: gitman.yml
+    location: .deps
+    deps:
+      .deps\mbd\.deps\can_log_utils:
+        name: can_log_utils
+        repo: https://github.com/huanmel/can_log_utils.git
+        rev: main
+        rev_locked: 8f117d7cbb9d8ef44b805f89eaab3904eb29db53
+        path: .deps\mbd\.deps\can_log_utils
+      .deps\mbd\.deps\EcuCalSrecA2L:
+        name: EcuCalSrecA2L
+        repo: https://github.com/huanmel/EcuCalSrecA2L.git
+        rev: main
+        rev_locked: c2b899b94027c2b1ecebcd2e5d87ef57ac415c7c
+        path: .deps\mbd\.deps\EcuCalSrecA2L
+  .deps\comps\drivers\hmidrvrdp187:
+    project_root: .deps\comps\drivers\hmidrvrdp187
+    config_file: gitman.yml
+    location: .deps
+    deps:
+      .deps\comps\drivers\hmidrvrdp187\.deps\Calatherm_HMI_TCU:
+        name: Calatherm_HMI_TCU
+        repo: git@gitlab.com:elitekl/data/dbc/Calatherm_HMI_TCU.git
+        rev: main
+        rev_locked: b2ff9ebdad99e95b1b29811d6df6fef3f4d65617
+        path: .deps\comps\drivers\hmidrvrdp187\.deps\Calatherm_HMI_TCU
+  .deps\comps\drivers\tmsinfodrvr:
+    project_root: .deps\comps\drivers\tmsinfodrvr
+    config_file: gitman.yml
+    location: .deps
+    deps:
+      .deps\comps\drivers\tmsinfodrvr\.deps\tms_module_info:
+        name: tms_module_info
+        repo: git@gitlab.com:elitekl/data/dbc/tms/tms_module_info.git
+        rev: main
+        rev_locked: 1a5da0097fd383c98bcd9dce4dee2c8e69636b9b
+        path: .deps\comps\drivers\tmsinfodrvr\.deps\tms_module_info

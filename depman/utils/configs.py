@@ -1,23 +1,18 @@
-"""
-Update checker using Gitman API + GitPython.
-"""
-
-import click
-from pathlib import Path
-from typing import List, Dict, Any, Optional
-from git import Repo, GitCommandError
-from gitman.models import Config
-import yaml  # For manual YAML loads
+from typing import Optional
+from datetime import datetime  # Add if not present (for res['datetime'])
 import time
 from functools import wraps
-import sys
-from datetime import datetime
-from rich.console import Console
-from rich.table import Table
+import click
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
+from depman import CONFIG_NAME, CACHE_GIT_REPOS, CACHE_CONFIGS   
+import yaml  # For manual YAML loads
+from git import Repo, GitCommandError
+from gitman.models import Config
+from itertools import chain
 
-CONFIG_NAME = 'gitman.yml'  # Global for config filename
-CACHE_GIT_REPOS = ".cache_git_repos.yaml"
-CACHE_CONFIGS = ".cache_configs.yaml"
+
+
 
 def timeit(func):
     @wraps(func)
@@ -31,23 +26,39 @@ def timeit(func):
         return result
     return timeit_wrapper
 
-def find_nested_configs(base_path: Path, depth: int = float("inf")) -> List[Path]:
-    """Find nested .gitman.yml files (simple walker; max depth to avoid cycles)."""
+def find_uninstalled_configs(d: Dict[str, Any]) -> List[str]:
+    """Recursively iterate over all key-value pairs in a nested dictionary."""
     configs = []
-    for config_path in base_path.glob(f"**/{CONFIG_NAME}"):
-        rel_depth = len(config_path.relative_to(base_path).parts) - 1
-        if depth > 0 and rel_depth >= depth:
-            continue
-        configs.append(config_path)
+    for key, value in d.items():
+        
+        if isinstance(value, dict):
+            if value.get('rev_installed') is None:
+                configs.append(key)
+            if 'deps' in value and value['deps']:
+                configs.extend(find_uninstalled_configs(value['deps']))
+        else:
+            pass
     return configs
 
+
+def find_git_root(start: str = ".") -> Optional[str]:
+    """Find the nearest Git root."""
+    start_path = Path(start).resolve()
+    current = start_path
+    while current != current.parent:
+        if (current / ".git").exists():
+            return str(current)
+        current = current.parent
+    return None
+
 @timeit
-def find_all_configs(root: Path) -> Dict[str, Any]:
+def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Load all .gitman.yml configs under root, flatten deps into structure.
     Returns: {'configs': {config_path: str: {'project_root': Path, 'location': str, 'deps': List[Dict{'name': str, 'repo': str, 'rev': str, 'path': Path}]}}}
     """
     configs = {}
+    repos = repos_in.get("repos", {})
     for config_path in root.glob(f"**/{CONFIG_NAME}"):
         project_root = config_path.parent
         try:
@@ -55,7 +66,7 @@ def find_all_configs(root: Path) -> Dict[str, Any]:
                 content = yaml.safe_load(f)
             
             location = content.get("location")
-            deps = []
+            deps = {}
             deps_locked={}
             # Flatten requirements
                 
@@ -72,18 +83,30 @@ def find_all_configs(root: Path) -> Dict[str, Any]:
                 name = req.get("name", Path(req["repo"]).name)
                 dep_path = project_root / location / name
                 dep_path_rel=str(dep_path.relative_to(root))
-                deps.append({
+                rev_installed = repos.get(dep_path_rel, {}).get("rev") if dep_path_rel in repos else None
+                rev_locked=deps_locked[dep_path_rel]["rev"] if dep_path_rel in deps_locked else None
+                rev = req["rev"]
+                if rev_installed:
+                    proj_root_relative=str(project_root.relative_to(root))
+                    repos[dep_path_rel]["used_in_configs"].update({proj_root_relative : rev_locked if rev_locked else rev_installed})
+                    
+                    
+                deps[dep_path_rel]={
                     "name": name,
                     "repo": req["repo"],
-                    "rev": req["rev"],
-                    "locked_rev": deps_locked[dep_path_rel]["rev"] if dep_path_rel in deps_locked else None,
+                    "rev": rev,
+                    "rev_locked": rev_locked,
+                    "rev_installed": rev_installed,
                     "path": dep_path_rel
-                })
-            project_root_short = project_root.relative_to(root)
+                }
+            project_root_short = str(project_root.relative_to(root))
+            rev_installed = repos.get(project_root_short, {}).get("rev") if dep_path_rel in repos else None
+
             configs[str(project_root_short)] = {
-                "project_root": str(project_root_short),
+                "project_root": project_root_short,
                 "config_file": str(config_path.name),
                 "location": location,
+                "rev_installed": rev_installed,                
                 "deps": deps
             }
         except Exception as e:
@@ -93,9 +116,8 @@ def find_all_configs(root: Path) -> Dict[str, Any]:
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "configs": configs
     }
-    return res
-
-from datetime import datetime  # Add if not present (for res['datetime'])
+    repos_in["repos"] = repos
+    return res, repos_in
 
 @timeit
 def find_all_git_repos(root: Path) -> Dict[str, Any]:
@@ -192,7 +214,20 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
                     ahead_commits = list(repo.iter_commits(f'{remote_ref.name}..HEAD'))
                     unpushed_count = len(ahead_commits)
                     has_unpushed = unpushed_count > 0
-
+                
+                
+                # get latest commit info
+                head_commit_info = None
+                try:
+                    commit = repo.head.commit
+                    head_commit_info = {
+                        "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                        "message": commit.message.split('\n')[0],
+                        "author": commit.author.name
+                    }
+                except (IndexError, AttributeError):
+                    pass
+                
                 # Main check (always, if exists; for non-detached, as before)
                 has_update_main = False
                 update_details_main = None
@@ -232,12 +267,13 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
                 repos[str(project_root_short)] = {
                     "name": project_root_short.name if project_root_short.name else ".",
                     "project_root": str(project_root_short),
-                    "revision": revision,
-                    "short_revision": short_revision,
+                    "rev": revision,
+                    "rev_short": short_revision,
                     "remote_url": remote_url,
                     "tags": tags,
                     "current_tag": current_tag,
                     "current_branch": current_branch,
+                    "commit_info": head_commit_info,
                     "has_update": has_update,
                     "update_details": update_details,
                     "has_update_main": has_update_main,
@@ -245,7 +281,8 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
                     "has_uncommitted": has_uncommitted,
                     "uncommitted_files": uncommitted_files,
                     "has_unpushed": has_unpushed,
-                    "unpushed_count": unpushed_count
+                    "unpushed_count": unpushed_count,
+                    "used_in_configs": {},
                 }
             except Exception as e:
                 click.echo(click.style(f"  {repo_path}: Error ({e})", fg="red"))
@@ -254,6 +291,141 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
         "repos": repos
     }
     return res
+
+
+"""
+analyze_configs_repos: Cross-analyze Gitman configs and Git repos dicts.
+Expands both in-place (mutates originals for simplicity; returns them for chaining).
+Requires: GitPython (git) for precise 'behind_main' checks (compares rev_locked to origin/main SHA).
+If dep path not in repos or no Git repo, sets behind_main=False.
+"""
+
+def print_list_configs_repos(
+    configs: Dict[str, Any], repos: Dict[str, Any],only_dirty: bool=False
+):
+    """print configs and repos summary."""
+    click.echo("\nRepos Summary:")
+    print(f"Total repos: {len(repos.get('repos', {}))}")
+    print(f"snapshot datetime: {repos.get('datetime', {})}")
+    for repo_path, repo_info in repos.get("repos", {}).items():
+        has_updates_repo = repo_info["has_uncommitted"] or repo_info["has_unpushed"] or repo_info["has_update"] or repo_info["has_update_main"]
+        conf=repo_info.get('used_in_configs')
+        is_rev_matched = False
+        if conf:
+            revs=list(conf.values())
+            # check if all revs match the installed rev
+            is_rev_matched = all( rev == repo_info.get('rev') for rev in revs)            
+      
+        msg_upd_style='bright_yellow' if has_updates_repo else 'bright_green'
+        
+        conf_style = 'bright_green' if is_rev_matched else 'bright_yellow'
+        
+        
+        is_all_ok = not has_updates_repo and is_rev_matched
+        
+        if only_dirty and is_all_ok:
+            continue
+        
+        sym =  "✅" if is_all_ok else "⚠️"
+        
+        
+        click.echo(f"{sym}  repo: {repo_path}        branch rev: {repo_info.get('current_branch')} {repo_info.get('rev_short')}")
+        click.echo(f"       datetime: {repo_info.get('commit_info')['datetime']} | message: {repo_info.get('commit_info')['message']}")
+        if has_updates_repo:
+            click.echo(click.style(f"         | Has Update: {repo_info.get('has_update')} | Uncommitted: {repo_info.get('has_uncommitted')} | Unpushed: {repo_info.get('has_unpushed')}",fg=msg_upd_style))
+            if repo_info.get('has_update') and repo_info.get('update_details'):
+                ud = repo_info.get('update_details')
+                click.echo(f"         | Update Details: Branch: {ud.get('branch')} | Latest Hash: {ud.get('latest_hash')} | Datetime: {ud.get('datetime')} | Message: {ud.get('message')}")
+        click.echo(click.style(f"         | configs: {repo_info.get('used_in_configs')}",fg=conf_style))
+        click.echo()
+        
+        # list configs without installations
+        # get all items wihtout rev_installed
+        
+    uninstalled_configs = find_uninstalled_configs(configs.get("configs", {}))
+    if uninstalled_configs:
+        click.echo("⚠️ Configs without installations:")
+        for uc in uninstalled_configs:
+            click.echo(click.style(f"  - {uc}", fg="red"))
+
+    # click.echo("Configs Summary:")
+    # for config_path, config_data in configs.get("configs", {}).items():
+    #     click.echo(f"  Config: {config_path}")
+    #     for dep_path, dep_info in config_data.get("deps", {}).items():
+    #         click.echo(f"    Dep: {dep_path} | Rev Locked: {dep_info.get('rev_locked')} | In Repos: {dep_info.get('in_repos')} | Rev Match: {dep_info.get('rev_match')} | Behind Main: {dep_info.get('behind_main')}")
+    
+
+@timeit
+def analyze_configs_repos(
+    configs: Dict[str, Any], repos: Dict[str, Any], root: Path
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Analyze and expand configs/repos dicts with cross-references.
+    
+    Adds to configs['.']['deps'][dep_path]:
+    - 'in_repos': bool (dep_path in repos)
+    - 'rev_match': bool (rev_locked == repos[dep_path]['revision'] if in_repos)
+    - 'behind_main': bool (rev_locked behind origin/main; uses GitPython fetch/compare)
+    
+    Adds to repos[repo_path]:
+    - 'in_config': bool (repo_path in configs['.']['deps'])
+    
+    Args:
+        configs: Loaded configs dict (e.g., from load_all_configs()['configs'])
+        repos: Loaded repos dict (e.g., from find_all_git_repos()['repos'])
+        root: Project root Path (for Git ops on deps)
+    
+    Returns:
+        Tuple[configs, repos] (expanded originals)
+    
+    Example:
+        configs, repos = analyze_configs_repos(configs, repos, Path('.'))
+        # Now configs['.']['deps']['.deps\\mbd']['behind_main'] == True/False
+    """
+    # Normalize paths (Windows \ vs /; use str keys as-is)
+    config_deps = configs.get('.', {}).get('deps', {})
+    for dep_path_str, dep_info in config_deps.items():
+        dep_path = Path(dep_path_str)
+        in_repos = dep_path_str in repos
+        dep_info['in_repos'] = in_repos
+        
+        rev_match = False
+        behind_main = False
+        if in_repos:
+            repo_info = repos[dep_path_str]
+            rev_match = dep_info['rev_locked'] == repo_info['rev']
+            dep_info['rev_match'] = rev_match
+            
+            # Check if rev_locked behind origin/main (precise Git check)
+            try:
+                repo = Repo(root / dep_path)
+                if hasattr(repo.remotes, 'origin'):
+                    repo.remotes.origin.fetch()
+                # Find origin/main or origin/HEAD
+                remote_ref_name = None
+                remote_ref = None
+                for ref_name in ['origin/main', 'origin/HEAD']:
+                    try:
+                        remote_ref = repo.refs[ref_name]
+                        remote_ref_name = ref_name
+                        break
+                    except IndexError:
+                        continue
+                if remote_ref and dep_info['rev_locked']:
+                    # Check if rev_locked..remote_ref has commits (behind)
+                    behind_commits = list(repo.iter_commits(f"{dep_info['rev_locked']}..{remote_ref.name}"))
+                    behind_main = len(behind_commits) > 0
+            except (GitCommandError, ValueError):  # No repo/rev
+                pass
+        else:
+            dep_info['rev_match'] = False
+        dep_info['behind_main'] = behind_main
+    
+    # For repos: Check if in config deps
+    for repo_path_str, repo_info in repos['repos'].items():
+        repo_info['in_config'] = repo_path_str in config_deps
+    
+    return configs, repos
 
 @timeit
 def find_all_git_repos1(root: Path) -> Dict[str, Any]:
@@ -384,7 +556,8 @@ def find_all_git_repos1(root: Path) -> Dict[str, Any]:
                     "has_uncommitted": has_uncommitted,
                     "uncommitted_files": uncommitted_files,
                     "has_unpushed": has_unpushed,
-                    "unpushed_count": unpushed_count
+                    "unpushed_count": unpushed_count,
+                    "configs" : [],
                 }
             except Exception as e:
                 click.echo(click.style(f"  {repo_path}: Error ({e})", fg="red"))
@@ -402,7 +575,13 @@ def is_git_repo(path: Path) -> bool:
         return True
     except:
         return False
-
+    
+def get_cashed_configs(root,CACHE_GIT_REPOS, CACHE_CONFIGS):
+    loaded_configs = yaml.safe_load(open(root/ CACHE_CONFIGS))
+    git_repos = yaml.safe_load(open( root / CACHE_GIT_REPOS))
+    print(f"✅ Loaded cached configs from {str(root/ CACHE_CONFIGS)}") 
+    print(f"✅ Loaded cached git status from {str(root/ CACHE_GIT_REPOS)}")
+    return loaded_configs, git_repos
 
 def print_project_tree(config: Config, root_path: Path, prefix: str = ""):
     """Print ASCII tree of project deps (requirements + groups)."""
@@ -458,308 +637,41 @@ def scan_gitman_projects(root: Path, scan_depth: int = float("inf")) -> List[tup
                 click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"))
     return projects
 
-
-@click.command()
-# @click.option("--recursive", is_flag=True, help="Flatten deps recursively for updates (legacy).")
-# @click.option("--scan-depth", type=int, default=None, help="Max recursion depth for scanning (default: unlimited).")
-@click.option("--use-cache",  is_flag=True, default=False, help="use cached YAML files instead of live scan (path to root).")
-@click.pass_context
-def check_updates_cmd(ctx: click.Context, use_cache: bool): #, recursive: bool, scan_depth: Optional[int]
-    """Check for upstream updates in Gitman dependencies (now scans all projects)."""
-    root = ctx.obj["root"]
-    # if scan_depth is None:
-    #     scan_depth = float("inf")
-
-    if use_cache:
-        loaded_configs = yaml.safe_load(open(root/ CACHE_CONFIGS))
-        print(f"✅ Loaded cached configs from {str(root/ CACHE_CONFIGS)}") 
-        git_repos = yaml.safe_load(open( root / CACHE_GIT_REPOS))
-        print(f"✅ Loaded cached git status from {str(root/ CACHE_GIT_REPOS)}") 
-        
-    else:
-        loaded_configs = find_all_configs(root)
-        cache_conf_file=root / CACHE_CONFIGS
-        with open(cache_conf_file, "w") as f:
-            yaml.safe_dump(loaded_configs, f, default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped loaded_configs to {cache_conf_file}")
-    
-    
-    
-        git_repos = find_all_git_repos(root)
-        num_repos = len(git_repos["repos"])
-        print(f"✅ find_all_git_repos: Found {num_repos} repos")
-        cache_repos_file=root / CACHE_GIT_REPOS
-        with open(cache_repos_file, "w") as f:
-            yaml.safe_dump(git_repos, f, default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped git_repos to {cache_repos_file}")
-    
-    # Table for updates
-    table = Table(title="Git deps status", show_header=True, header_style="bold magenta")
-    cols=["Dep", "Status", "Uncommitted", "Unpushed", "Update", "Update Main"]
-    for col in cols:
-        table.add_column(col, style="dim", overflow="fold")
- 
-    has_updates = False
-    click.echo(click.style(f"\n=== Git Repos Status (scanned at {git_repos['datetime']}) ===", bold=True))
-    
-    for key, val in git_repos["repos"].items():
-        has_updates_repo = val["has_uncommitted"] or val["has_unpushed"] or val["has_update"] or val["has_update_main"]
-
-        if val["has_uncommitted"]:
-            click.echo(click.style(f"⚠️  Repo {key} has uncommitted changes: {val['uncommitted_files']}", fg="yellow"))
-            has_updates_repo = True
-        if val["has_unpushed"]:
-            click.echo(click.style(f"⚠️  Repo {key} has {val['unpushed_count']} unpushed commits", fg="yellow"))
-        if val["has_update"]:
-            details = val["update_details"]
-            click.echo(click.style(f"⚠️  Repo {key} has updates on branch {details['branch']}: {details['latest_hash'][:7]} - {details['message']}", fg="yellow"))
-        if val["has_update_main"]:
-            details = val["update_details_main"]
-            click.echo(click.style(f"⚠️  Repo {key} has updates on main branch {details['branch']}: {details['latest_hash'][:7]} - {details['message']}", fg="yellow"))
-        
-
-        has_updates = has_updates or has_updates_repo
-        table.add_row(*[
-            key,
-            "⚠️" if has_updates_repo else "✅",
-            "⚠️" if val["has_uncommitted"] else "✅",
-            "⚠️" if val["has_unpushed"] else "✅",
-            "⚠️" if val["has_update"] else "✅",
-            "⚠️" if val["has_update_main"] else "✅"
-        ],  style='bright_green' if not has_updates_repo else 'bright_yellow')
-        # table.add_row(
-        #     key,
-        #     "!" if has_updates_repo else "ok",
-        #     "!" if val["has_uncommitted"] else "ok",
-        #     "!" if val["has_unpushed"] else "ok",
-        #     "!" if val["has_update"] else "ok",
-        #     "!" if val["has_update_main"] else "ok",
-        #     style='bright_green' if not has_updates_repo else 'bright_yellow'
-        # )
-        
-    console = Console()
-    console.print(table)
-    if has_updates:
-        click.echo(click.style("⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
-    return # Early return to avoid full project scan for now
-    for project_root, config in projects:
-        click.echo(click.style(f"\n=== Project: {project_root} ===", bold=True))
-        print_project_tree(config, project_root)
-
-        location = project_root / config.content.get("location", "requirements")
-        all_reqs = get_all_requirements(config, recursive)
-
-        if not all_reqs:
-            click.echo("No requirements found.")
+def find_nested_configs(base_path: Path, depth: int = float("inf")) -> List[Path]:
+    """Find nested .gitman.yml files (simple walker; max depth to avoid cycles)."""
+    configs = []
+    for config_path in base_path.glob(f"**/{CONFIG_NAME}"):
+        rel_depth = len(config_path.relative_to(base_path).parts) - 1
+        if depth > 0 and rel_depth >= depth:
             continue
-
-        # Table for updates
-        table = click.table(
-            [("Dep", "Status", "Repo")],
-            [("", "", "")],  # Header row
-            headers=False,
-            colalign=("left", "left", "left"),
-        )
-        table.add_row(["", "", ""])  # Spacer
-
-        has_updates = False
-        for req in all_reqs:
-            name = req.get("name", Path(req["repo"]).name)
-            repo_url = req["repo"]
-            target_rev = req["rev"]
-            dep_path = location / name
-
-            if not dep_path.exists():
-                status = click.style("Not installed", fg="yellow")
-                table.add_row([name, status, repo_url])
-                continue
-
-            try:
-                repo = Repo(dep_path)
-                repo.remotes.origin.fetch()
-
-                current_sha = repo.head.commit.hexsha
-                try:
-                    origin_ref = repo.refs[f"origin/{target_rev}"]
-                    latest_sha = origin_ref.commit.hexsha
-                    is_branch = True
-                except IndexError:
-                    latest_sha = repo.rev_parse(target_rev).hexsha
-                    is_branch = False
-
-                short_current = current_sha[:8]
-                short_latest = latest_sha[:8]
-
-                if current_sha == latest_sha:
-                    status = click.style("Up to date", fg="green")
-                else:
-                    has_updates = True
-                    if is_branch:
-                        status = click.style(f"Update avail. ({short_current} → {short_latest})", fg="red")
-                    else:
-                        status = click.style(f"Mismatch ({short_latest})", fg="yellow")
-
-                table.add_row([name, status, repo_url])
-
-            except GitCommandError as e:
-                status = click.style(f"Git error ({e})", fg="red")
-                table.add_row([name, status, repo_url])
-            except KeyError as e:
-                status = click.style(f"Missing key ({e})", fg="yellow")
-                table.add_row([name, status, repo_url])
-
-        click.echo(table)
-        if has_updates:
-            click.echo(click.style("⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
+        configs.append(config_path)
+    return configs
 
 
-if __name__ == "__main__":
-    """Quick debug tests—run: python -m depman.checker [--test-path /path/to/project]"""
-    import tempfile
-    import argparse  # Simple arg parse for path (lightweight)
-    
-    parser = argparse.ArgumentParser(description="Debug Checker Functions")
-    parser.add_argument("--test-path", type=str, default=None, help="Path to real Gitman project for full test (overrides mocks)")
-    args = parser.parse_args()
-    
-    print("=== Debug Tests for Checker Functions ===")
-    if args.test_path:
-        # Full real-project test
-        root = Path(args.test_path).resolve()
-        if not root.exists():
-            raise ValueError(f"Test path {root} does not exist.")
-        
-        print(f"🔍 Testing with real project: {root}")
-        loaded_configs = find_all_configs(root)
-        
-        # New: Test load_all_configs
-        
-        cache_conf_file=root / CACHE_CONFIGS
-        with open(cache_conf_file, "w") as f:
-            yaml.safe_dump(loaded_configs, f, default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped loaded_configs to {cache_conf_file}")
 
-        
-        assert "configs" in loaded_configs, "No 'configs' key"
-        num_configs = len(loaded_configs["configs"])
-        assert num_configs > 0, f"No configs found in {root}"
-        print(f"✅ load_all_configs: Loaded {num_configs} configs")
-        print("Sample config structure:", list(loaded_configs["configs"].keys())[:1])  # First key
-        if num_configs > 0:
-            sample_deps = loaded_configs["configs"]['.']["deps"]
-            print(f"  Sample deps: {len(sample_deps)} (e.g., {sample_deps[0] if sample_deps else 'none'})")
-        
-        # New: Test find_all_git_repos
+def get_configs_and_repos(root: Path, use_cache: bool = False):
+    """Get configs and git repos, using cache if specified."""
+    if use_cache:
+        loaded_configs, git_repos = get_cashed_configs(
+            root, CACHE_GIT_REPOS, CACHE_CONFIGS)
+
+    else:
         git_repos = find_all_git_repos(root)
-        assert "repos" in git_repos, "No 'repos' key"
         num_repos = len(git_repos["repos"])
         print(f"✅ find_all_git_repos: Found {num_repos} repos")
-        if num_repos > 0:
-            sample_repo = list(git_repos["repos"].values())[0]
-            print(f"  Sample repo info: rev={sample_repo['revision'][:8]}, remote={sample_repo['remote_url']}, tags={len(sample_repo['tags'])}")
         
-        cache_repos_file=root / CACHE_GIT_REPOS
+        loaded_configs, git_repos = find_all_configs(root, git_repos)
+        # num_configs = len(loaded_configs["configs"])
+        cache_conf_file = root / CACHE_CONFIGS
+        with open(cache_conf_file, "w") as f:
+            yaml.safe_dump(loaded_configs, f,
+                           default_flow_style=False, sort_keys=False)
+        print(f"✅ Dumped loaded_configs to {cache_conf_file}")
+
+
+        cache_repos_file = root / CACHE_GIT_REPOS
         with open(cache_repos_file, "w") as f:
-            yaml.safe_dump(git_repos, f, default_flow_style=False, sort_keys=False)
+            yaml.safe_dump(
+                git_repos, f, default_flow_style=False, sort_keys=False)
         print(f"✅ Dumped git_repos to {cache_repos_file}")
-        sys.exit(0)
-        
-        # # Existing tests (scan, tree, etc.)
-        # configs = find_nested_configs(test_root, depth=float("inf"))
-        # assert len(configs) > 0, f"No .gitman.yml found in {test_root}"
-        # print(f"✅ find_nested_configs: Found {len(configs)} files")
-        
-        # projects = scan_gitman_projects(test_root)
-        # assert len(projects) > 0, f"No Gitman projects in {test_root}"
-        # print(f"✅ scan_gitman_projects: Found {len(projects)} projects")
-        
-        # project_root, config = projects[0]
-        # print(f"\n--- Real Tree Output for {project_root} ---")
-        # print_project_tree(config, project_root)
-        # all_reqs = get_all_requirements(config)
-        # assert len(all_reqs) > 0, "No requirements in project"
-        # print(f"✅ print_project_tree & get_all_requirements: Tree printed, {len(all_reqs)} flattened reqs")
-        
-        # # End-to-end update check (limited)
-        # location = project_root / config.content.get("location", "requirements")
-        # has_updates = False
-        # for req in all_reqs[:3]:
-        #     name = req.get("name", Path(req["repo"]).name)
-        #     repo_url = req["repo"]
-        #     target_rev = req["rev"]
-        #     dep_path = location / name
-        #     if not dep_path.exists():
-        #         print(f"  {name}: Not installed (skipping)")
-        #         continue
-        #     try:
-        #         repo = Repo(dep_path)
-        #         repo.remotes.origin.fetch()
-        #         current_sha = repo.head.commit.hexsha
-        #         try:
-        #             origin_ref = repo.refs[f"origin/{target_rev}"]
-        #             latest_sha = origin_ref.commit.hexsha
-        #         except IndexError:
-        #             latest_sha = repo.rev_parse(target_rev).hexsha
-        #         if current_sha != latest_sha:
-        #             has_updates = True
-        #             print(f"  {name}: Update detected! ({current_sha[:8]} → {latest_sha[:8]})")
-        #         else:
-        #             print(f"  {name}: Up to date ({current_sha[:8]})")
-        #     except Exception as e:
-        #         print(f"  {name}: Error ({e})")
-        # print(f"✅ End-to-end update check: Ran on {min(3, len(all_reqs))} deps, updates: {has_updates}")
-        
-        print("\n=== Real Project Debug Tests Passed! ===")
-    else:
-        # Fallback mock tests (updated to use new functions)
-        print("🧪 Running mock tests (use --test-path for real project)")
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            # Create nested .gitman.yml
-            (tmp_path / "proj1" / CONFIG_NAME).write_text(yaml.dump({
-                "requirements": [{"name": "dep1", "repo": "https://ex/dep1", "rev": "main"}]
-            }))
-            (tmp_path / "proj1" / "sub" / CONFIG_NAME).write_text(yaml.dump({
-                "groups": {"g1": [{"name": "dep2", "repo": "https://ex/dep2", "rev": "v1"}]}
-            }))
-            loaded = find_all_configs(tmp_path)
-            assert len(loaded["configs"]) == 2
-            print(f"✅ load_all_configs (mock): {len(loaded['configs'])} configs")
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            proj1 = tmp_path / "proj1"
-            proj1.mkdir()
-            (proj1 / ".git").mkdir()  # Simple mock; full Repo needs init/commit in real
-            assert is_git_repo(proj1) is False  # Empty .git not valid
-            print("✅ is_git_repo: Handled invalid (for mock)")
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            config_path = tmp_path / CONFIG_NAME
-            config_path.write_text(yaml.dump({
-                "requirements": [{"name": "req1", "repo": "https://ex/req1", "rev": "main"}],
-                "groups": {"testgroup": [{"name": "gdep1", "repo": "https://ex/gdep1", "rev": "develop"}]}
-            }))
-            (tmp_path / ".git").mkdir()
-            config = Config.load(config_path)
-            print("\n--- Sample Tree Output ---")
-            print_project_tree(config, tmp_path)
-            all_reqs = get_all_requirements(config)
-            assert len(all_reqs) == 2
-            print(f"✅ print_project_tree & get_all_requirements (mock): {len(all_reqs)} reqs")
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            proj_dir = tmp_path / "testproj"
-            proj_dir.mkdir()
-            (proj_dir / ".git").mkdir()
-            (proj_dir / CONFIG_NAME).write_text(yaml.dump({
-                "requirements": [{"name": "testdep", "repo": "https://ex/test", "rev": "main"}]
-            }))
-            projects = scan_gitman_projects(tmp_path)
-            assert len(projects) == 0  # Mock invalid repo
-            print("✅ scan_gitman_projects (mock): Handled invalid repos")
-        
-        print("\n=== Mock Debug Tests Passed! ===")
+    return loaded_configs, git_repos

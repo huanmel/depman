@@ -37,6 +37,18 @@ Example output:
 
 Full opts: `depman --help`, `depman gm --help`.
 
+### chech consistency between all project configs and git
+
+Usecase: after working with projects and subprojects before build need make clean configs.
+For this need:
+
+    - check for dirty projects
+    - git projects and files that are not under config control mark as dirty
+    - clean dirty (restore, submit changes, delete, add to config)
+    - check which config revision differ from git
+    - lock dependencies where needed
+
+
 
 
 ## Development
