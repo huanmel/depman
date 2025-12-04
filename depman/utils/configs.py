@@ -307,21 +307,28 @@ def print_list_configs_repos(
     click.echo("\nRepos Summary:")
     print(f"Total repos: {len(repos.get('repos', {}))}")
     print(f"snapshot datetime: {repos.get('datetime', {})}")
+    is_total_ok = True
     for repo_path, repo_info in repos.get("repos", {}).items():
         has_updates_repo = repo_info["has_uncommitted"] or repo_info["has_unpushed"] or repo_info["has_update"] or repo_info["has_update_main"]
         conf=repo_info.get('used_in_configs')
         is_rev_matched = False
-        if conf:
-            revs=list(conf.values())
-            # check if all revs match the installed rev
-            is_rev_matched = all( rev == repo_info.get('rev') for rev in revs)            
+        if repo_path == ".":
+            # skip root repo
+            is_rev_matched = True
+        else:
+            if conf:
+                revs=list(conf.values())
+                # check if all revs match the installed rev
+                is_rev_matched = all( rev == repo_info.get('rev') for rev in revs)            
       
         msg_upd_style='bright_yellow' if has_updates_repo else 'bright_green'
         
-        conf_style = 'bright_green' if is_rev_matched else 'bright_yellow'
+        conf_style = 'white' if is_rev_matched else 'bright_yellow'
         
         
         is_all_ok = not has_updates_repo and is_rev_matched
+        if not is_all_ok:
+            is_total_ok = False
         
         if only_dirty and is_all_ok:
             continue
@@ -336,8 +343,9 @@ def print_list_configs_repos(
             if repo_info.get('has_update') and repo_info.get('update_details'):
                 ud = repo_info.get('update_details')
                 click.echo(f"         | Update Details: Branch: {ud.get('branch')} | Latest Hash: {ud.get('latest_hash')} | Datetime: {ud.get('datetime')} | Message: {ud.get('message')}")
-        click.echo(click.style(f"         | configs: {repo_info.get('used_in_configs')}",fg=conf_style))
-        click.echo()
+        if (not is_rev_matched or not only_dirty):
+            click.echo(click.style(f"         | configs: {repo_info.get('used_in_configs')}",fg=conf_style))
+            click.echo()
         
         # list configs without installations
         # get all items wihtout rev_installed
@@ -347,6 +355,9 @@ def print_list_configs_repos(
         click.echo("⚠️ Configs without installations:")
         for uc in uninstalled_configs:
             click.echo(click.style(f"  - {uc}", fg="red"))
+    is_total_ok = is_total_ok and (len(uninstalled_configs) == 0)
+    if is_total_ok:
+        click.echo(click.style("✅ All repos are up-to-date and matching installed revisions.", fg="green"))    
 
     # click.echo("Configs Summary:")
     # for config_path, config_data in configs.get("configs", {}).items():
