@@ -12,9 +12,11 @@ from gitman.models import Config
 from itertools import chain
 from rich.console import Console
 from rich.table import Table
+import os
 
 from gitman import update as gitman_update
 from tqdm import tqdm
+import pyperclip 
 
 
 
@@ -307,11 +309,11 @@ If dep path not in repos or no Git repo, sets behind_main=False.
 """
 
 def print_check_table(
-    configs: Dict[str, Any], git_repos: Dict[str, Any],only_dirty: bool=False, root: Path=Path('.')):
+    configs: Dict[str, Any], git_repos: Dict[str, Any],only_dirty: bool=False, root: Path=Path('.'), list_mode: bool=False, list_open_terminal: bool = True, update_mode: bool=False):
     # Table for updates
     table = Table(title="Git deps status", show_header=True,
                   header_style="bold magenta")
-    cols = ["Dep", "Status", "Uncommitted",
+    cols = ["#", "Dep", "Status", "Uncommitted",
             "Unpushed", "Update", "Update Main"]
     for col in cols:
         table.add_column(col, style="dim", overflow="fold")
@@ -321,7 +323,7 @@ def print_check_table(
     click.echo(click.style(
         f"\n=== Git Repos Status (scanned at {git_repos['datetime']}) ===", bold=True))
 
-    for key, val in git_repos["repos"].items():
+    for idx, (key, val) in enumerate(git_repos["repos"].items()):
         has_updates_repo = val["has_uncommitted"] or val["has_unpushed"] or val["has_update"] or val["has_update_main"]
 
         if val["has_uncommitted"]:
@@ -342,7 +344,7 @@ def print_check_table(
                 f"⚠️  Repo {key} has updates on main branch {details['branch']}: {details['latest_hash'][:7]} - {details['message']}", fg="yellow"))
 
         has_updates = has_updates or has_updates_repo
-        table.add_row(*[
+        table.add_row(*[str(idx),
             key,
             "⚠️" if has_updates_repo else "✅",
             "⚠️" if val["has_uncommitted"] else "✅",
@@ -362,7 +364,64 @@ def print_check_table(
 
     console = Console()
     console.print(table)
-    if has_updates:
+    if list_mode:
+        click.echo(click.style(
+            "select #:", fg="green"))
+        # c = click.getchar(echo=True)
+        #     click.echo("Enter a string: ")
+        # Standard Python input() reads a full line as a string
+        c = input()
+        click.echo(f"You entered: {c}")
+        click.echo()
+        if c.isdigit():
+            idx_sel = int(c)
+            if idx_sel >=0 and idx_sel < len(git_repos["repos"]):
+                repo_key = list(git_repos["repos"].keys())[idx_sel]
+                click.echo(click.style(
+                    f"Details for repo {c} {repo_key}:", fg="green"))
+                repo_info = git_repos["repos"][repo_key]
+                click.echo(yaml.dump(repo_info, sort_keys=False))
+                project_root = Path(root) / repo_key
+                command = f'cd {project_root} && git status'
+                click.echo(click.style(
+                    f"cd {project_root}", fg="cyan"))
+                # os.chdir(project_root)
+                # os.system(f'cd {project_root}')
+                pyperclip.copy(command)
+                
+                if list_open_terminal:
+                    
+                    # Windows Terminal command to open in specified directory
+                    # wt_command = f'wt -d "{project_root}"'
+                        # Windows Terminal command to open new tab in same window
+                    # wt_command = f'wt -w 0 new-tab -d "{project_root}"'
+                            # wt command with various options:
+                    # -w 0: Use current window (0 means "always open here")
+                    # new-tab: Open new tab
+                    # -d: Set starting directory
+                    wt_command = [
+                        'wt.exe',
+                        '-w', '0',  # Use current window
+                        # 'new-tab',
+                        'split-pane',
+                        '-V',
+                        '-d', project_root
+                    ]
+                    print(f"\nTo open in Windows Terminal, run:")
+                    print(wt_command)
+                    
+                    # Try to execute it
+                    try:
+                        import subprocess
+                        subprocess.run(wt_command, shell=True)
+                    except:
+                        print("Make sure Windows Terminal is installed")
+            else:
+                click.echo(click.style(
+                    f"Invalid selection: {c}", fg="red"))
+        return
+    
+    if update_mode and has_updates:
         click.echo(click.style(
             "⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
         click.echo("\n".join(updates_projects))
@@ -372,7 +431,26 @@ def print_check_table(
         if c == 'y':
             click.echo('apply updates')
             # gitman_update(*updates_projects,root=root)
-            gitman_update(root=root)
+            # gitman_update(root=root)
+            for p in updates_projects:
+                click.echo(click.style(f"apply update for {p}? [y/enter/n] ", fg="yellow"))
+                print("Current commit info:")
+                print(git_repos['repos'][p]['commit_info']['datetime'], "|", git_repos['repos'][p]['commit_info']['message'])
+                print("Update details:")
+                print(git_repos['repos'][p]['update_details']['datetime'], "|", git_repos['repos'][p]['update_details']['message'])
+                c = click.getchar()
+                click.echo()
+                if (c == 'y' or c == '\n'):
+                    full_p=Path(root,p)
+                    conf_name = configs['configs']['.']['deps'][p]['name'] if p in configs['configs']['.']['deps'] else None
+                    if conf_name:
+                        print(f'Updating {p} in config {conf_name}')
+                        gitman_update(conf_name,root=root)
+                        click.echo(click.style(f"Updated {p}", fg="green"))
+                    else:
+                        click.echo(click.style(f"Skipped {p} (not in any config)", fg="red"))
+                else:
+                    click.echo(f'Skipped {p}')
         elif c == 'n':
             click.echo('Abort!')
         else:
@@ -453,7 +531,7 @@ def print_check_table(
         #         "⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
 
 def print_list_configs_repos(
-    configs: Dict[str, Any], repos: Dict[str, Any],only_dirty: bool=False
+    configs: Dict[str, Any], repos: Dict[str, Any],only_dirty: bool=False, list_mode = False
 ):
     """print configs and repos summary."""
     click.echo("\nRepos Summary:")
