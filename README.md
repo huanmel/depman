@@ -2,7 +2,6 @@
 
 CLI tool for managing and auditing [Gitman](https://github.com/jacebrowning/gitman) dependency trees. Wraps Gitman commands and adds a rich status dashboard across all nested git repos.
 
-[![PyPI](https://img.shields.io/pypi/v/depman.svg)](https://pypi.org/project/depman/)
 
 ## Features
 
