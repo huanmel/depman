@@ -71,8 +71,11 @@ def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, An
         try:
             with open(config_path) as f:
                 content = yaml.safe_load(f)
-            
-            location = content.get("location")
+            if not isinstance(content, dict):
+                # empty file (safe_load -> None) or malformed content (not a mapping)
+                content = {}
+
+            location = content.get("location", "gitman_sources")  # gitman's own default
             deps = {}
             deps_locked={}
             # Flatten requirements

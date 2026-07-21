@@ -4,6 +4,7 @@ Update checker using Gitman API + GitPython.
 
 import click
 
+from depman.commands.review import ORDER_CHOICES, ORDER_HELP, run_review
 from depman.utils.configs import (
     get_configs_and_repos,
     print_check_table,
@@ -42,12 +43,31 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
     default=False,
     help="only in list mode: open selected project in terminal.",
 )
+@click.option(
+    "--review",
+    "-r",
+    is_flag=True,
+    default=False,
+    help="after showing the status table, enter the semi-automatic commit/revert review "
+    "(see 'depman review --help'); reuses this scan instead of rescanning.",
+)
+@click.option("--order", type=click.Choice(ORDER_CHOICES), default="root-last", help=ORDER_HELP)
 @click.pass_context
-def check_cmd(ctx: click.Context, use_cache: bool, update_mode: bool, list_mode: bool, terminal_mode: bool):
+def check_cmd(
+    ctx: click.Context,
+    use_cache: bool,
+    update_mode: bool,
+    list_mode: bool,
+    terminal_mode: bool,
+    review: bool,
+    order: str,
+):
     """Check for upstream updates in Gitman dependencies (now scans all projects)."""
     root = ctx.obj["root"]
     loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache)
     print_check_table(loaded_configs, git_repos, root=root,update_mode=update_mode,list_mode=list_mode,list_open_terminal=terminal_mode)
+    if review:
+        run_review(root, git_repos, order=order)
 
 
 @click.command(context_settings=CONTEXT_SETTINGS)

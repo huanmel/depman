@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 from .commands.gm_commands import gm
 from .commands.checker import check_cmd, list_cmd
+from .commands.review import review_cmd
 from .utils.configs import find_git_root
 
 
@@ -35,8 +36,8 @@ def cli(ctx: click.Context, root: Optional[str]):
 
 cli.add_command(gm)
 cli.add_command(check_cmd)
-
 cli.add_command(list_cmd)
+cli.add_command(review_cmd)
 
 
 if __name__ == "__main__":
