@@ -107,7 +107,7 @@ def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, An
                     "path": dep_path_rel
                 }
             project_root_short = str(project_root.relative_to(root))
-            rev_installed = repos.get(project_root_short, {}).get("rev") if dep_path_rel in repos else None
+            rev_installed = repos.get(project_root_short, {}).get("rev")
 
             configs[str(project_root_short)] = {
                 "project_root": project_root_short,
@@ -301,15 +301,8 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
     return res
 
 
-"""
-analyze_configs_repos: Cross-analyze Gitman configs and Git repos dicts.
-Expands both in-place (mutates originals for simplicity; returns them for chaining).
-Requires: GitPython (git) for precise 'behind_main' checks (compares rev_locked to origin/main SHA).
-If dep path not in repos or no Git repo, sets behind_main=False.
-"""
-
 def print_check_table(
-    configs: Dict[str, Any], git_repos: Dict[str, Any],only_dirty: bool=False, root: Path=Path('.'), list_mode: bool=False, list_open_terminal: bool = True, update_mode: bool=False):
+    configs: Dict[str, Any], git_repos: Dict[str, Any], root: Path=Path('.'), list_mode: bool=False, list_open_terminal: bool = True, update_mode: bool=False):
     # Table for updates
     table = Table(title="Git deps status", show_header=True,
                   header_style="bold magenta")
@@ -390,31 +383,25 @@ def print_check_table(
                 pyperclip.copy(command)
                 
                 if list_open_terminal:
-                    
-                    # Windows Terminal command to open in specified directory
-                    # wt_command = f'wt -d "{project_root}"'
-                        # Windows Terminal command to open new tab in same window
-                    # wt_command = f'wt -w 0 new-tab -d "{project_root}"'
-                            # wt command with various options:
+                    # wt command with various options:
                     # -w 0: Use current window (0 means "always open here")
-                    # new-tab: Open new tab
+                    # split-pane -V: open a new vertical split pane
                     # -d: Set starting directory
                     wt_command = [
                         'wt.exe',
-                        '-w', '0',  # Use current window
-                        # 'new-tab',
+                        '-w', '0',
                         'split-pane',
                         '-V',
-                        '-d', project_root
+                        '-d', str(project_root)
                     ]
                     print(f"\nTo open in Windows Terminal, run:")
-                    print(wt_command)
-                    
+                    print(" ".join(wt_command))
+
                     # Try to execute it
                     try:
                         import subprocess
-                        subprocess.run(wt_command, shell=True)
-                    except:
+                        subprocess.run(wt_command, shell=False)
+                    except Exception:
                         print("Make sure Windows Terminal is installed")
             else:
                 click.echo(click.style(
@@ -442,7 +429,7 @@ def print_check_table(
                 click.echo()
                 if (c == 'y' or c == '\n'):
                     full_p=Path(root,p)
-                    conf_name = configs['configs']['.']['deps'][p]['name'] if p in configs['configs']['.']['deps'] else None
+                    conf_name = find_dep_config_name(configs, p)
                     if conf_name:
                         print(f'Updating {p} in config {conf_name}')
                         gitman_update(conf_name,root=root)
@@ -455,80 +442,16 @@ def print_check_table(
             click.echo('Abort!')
         else:
             click.echo('Invalid input :(')
-        # for project_root, config in projects:
-        # click.echo(click.style(
-        #     f"\n=== Project: {project_root} ===", bold=True))
-        # print_project_tree(config, project_root)
 
-        # location = project_root / \
-        #     config.content.get("location", "requirements")
-        # all_reqs = get_all_requirements(config, recursive)
 
-        # if not all_reqs:
-        #     click.echo("No requirements found.")
-        #     continue
+def find_dep_config_name(configs: Dict[str, Any], dep_path: str) -> Optional[str]:
+    """Find the dep name for dep_path by searching every loaded config (root and nested), not just root."""
+    for config_entry in configs.get('configs', {}).values():
+        deps = config_entry.get('deps', {})
+        if dep_path in deps:
+            return deps[dep_path]['name']
+    return None
 
-        # # Table for updates
-        # table = click.table(
-        #     [("Dep", "Status", "Repo")],
-        #     [("", "", "")],  # Header row
-        #     headers=False,
-        #     colalign=("left", "left", "left"),
-        # )
-        # table.add_row(["", "", ""])  # Spacer
-
-        # has_updates = False
-        # for req in all_reqs:
-        #     name = req.get("name", Path(req["repo"]).name)
-        #     repo_url = req["repo"]
-        #     target_rev = req["rev"]
-        #     dep_path = location / name
-
-        #     if not dep_path.exists():
-        #         status = click.style("Not installed", fg="yellow")
-        #         table.add_row([name, status, repo_url])
-        #         continue
-
-        #     try:
-        #         repo = Repo(dep_path)
-        #         repo.remotes.origin.fetch()
-
-        #         current_sha = repo.head.commit.hexsha
-        #         try:
-        #             origin_ref = repo.refs[f"origin/{target_rev}"]
-        #             latest_sha = origin_ref.commit.hexsha
-        #             is_branch = True
-        #         except IndexError:
-        #             latest_sha = repo.rev_parse(target_rev).hexsha
-        #             is_branch = False
-
-        #         short_current = current_sha[:8]
-        #         short_latest = latest_sha[:8]
-
-        #         if current_sha == latest_sha:
-        #             status = click.style("Up to date", fg="green")
-        #         else:
-        #             has_updates = True
-        #             if is_branch:
-        #                 status = click.style(
-        #                     f"Update avail. ({short_current} → {short_latest})", fg="red")
-        #             else:
-        #                 status = click.style(
-        #                     f"Mismatch ({short_latest})", fg="yellow")
-
-        #         table.add_row([name, status, repo_url])
-
-        #     except GitCommandError as e:
-        #         status = click.style(f"Git error ({e})", fg="red")
-        #         table.add_row([name, status, repo_url])
-        #     except KeyError as e:
-        #         status = click.style(f"Missing key ({e})", fg="yellow")
-        #         table.add_row([name, status, repo_url])
-
-        # click.echo(table)
-        # if has_updates:
-        #     click.echo(click.style(
-        #         "⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
 
 def print_list_configs_repos(
     configs: Dict[str, Any], repos: Dict[str, Any],only_dirty: bool=False, list_mode = False
@@ -582,25 +505,29 @@ def print_list_configs_repos(
         if (not is_rev_matched or not only_dirty):
             click.echo(click.style(f"       configs: {repo_info.get('used_in_configs')}",fg=conf_style))
             click.echo()
-        
-        # list configs without installations
-        # get all items wihtout rev_installed
-        
+
     uninstalled_configs = find_uninstalled_configs(configs.get("configs", {}))
     if uninstalled_configs:
         click.echo("⚠️ Configs without installations:")
         for uc in uninstalled_configs:
             click.echo(click.style(f"  - {uc}", fg="yellow"))
     is_total_ok = is_total_ok and (len(uninstalled_configs) == 0)
-    if is_total_ok:
-        click.echo(click.style("✅ All repos are up-to-date, installed revisions matching configs.", fg="green"))    
 
-    # click.echo("Configs Summary:")
-    # for config_path, config_data in configs.get("configs", {}).items():
-    #     click.echo(f"  Config: {config_path}")
-    #     for dep_path, dep_info in config_data.get("deps", {}).items():
-    #         click.echo(f"    Dep: {dep_path} | Rev Locked: {dep_info.get('rev_locked')} | In Repos: {dep_info.get('in_repos')} | Rev Match: {dep_info.get('rev_match')} | Behind Main: {dep_info.get('behind_main')}")
-    
+    behind_main_deps = [
+        f"{dep_path} (in config {config_path})"
+        for config_path, config_entry in configs.get("configs", {}).items()
+        for dep_path, dep_info in config_entry.get("deps", {}).items()
+        if dep_info.get("behind_main")
+    ]
+    if behind_main_deps:
+        click.echo("⚠️ Deps whose locked revision is behind origin/main:")
+        for d in behind_main_deps:
+            click.echo(click.style(f"  - {d}", fg="yellow"))
+    is_total_ok = is_total_ok and (len(behind_main_deps) == 0)
+
+    if is_total_ok:
+        click.echo(click.style("✅ All repos are up-to-date, installed revisions matching configs.", fg="green"))
+
 
 @timeit
 def analyze_configs_repos(
@@ -608,225 +535,80 @@ def analyze_configs_repos(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Analyze and expand configs/repos dicts with cross-references.
-    
-    Adds to configs['.']['deps'][dep_path]:
-    - 'in_repos': bool (dep_path in repos)
-    - 'rev_match': bool (rev_locked == repos[dep_path]['revision'] if in_repos)
+    Covers every loaded config (root and nested), not just the root config.
+
+    Adds to configs['configs'][config_path]['deps'][dep_path]:
+    - 'in_repos': bool (dep_path in repos['repos'])
+    - 'rev_match': bool (rev_locked == repos['repos'][dep_path]['rev'] if in_repos)
     - 'behind_main': bool (rev_locked behind origin/main; uses GitPython fetch/compare)
-    
-    Adds to repos[repo_path]:
-    - 'in_config': bool (repo_path in configs['.']['deps'])
-    
+
+    Adds to repos['repos'][repo_path]:
+    - 'in_config': bool (repo_path declared as a dep in any loaded config)
+
     Args:
-        configs: Loaded configs dict (e.g., from load_all_configs()['configs'])
-        repos: Loaded repos dict (e.g., from find_all_git_repos()['repos'])
+        configs: Loaded configs dict, the {'configs': {...}} shape from find_all_configs()
+        repos: Loaded repos dict, the {'repos': {...}} shape from find_all_git_repos()
         root: Project root Path (for Git ops on deps)
-    
+
     Returns:
         Tuple[configs, repos] (expanded originals)
-    
-    Example:
-        configs, repos = analyze_configs_repos(configs, repos, Path('.'))
-        # Now configs['.']['deps']['.deps\\mbd']['behind_main'] == True/False
     """
-    # Normalize paths (Windows \ vs /; use str keys as-is)
-    config_deps = configs.get('.', {}).get('deps', {})
-    for dep_path_str, dep_info in config_deps.items():
-        dep_path = Path(dep_path_str)
-        in_repos = dep_path_str in repos
-        dep_info['in_repos'] = in_repos
-        
-        rev_match = False
-        behind_main = False
-        if in_repos:
-            repo_info = repos[dep_path_str]
-            rev_match = dep_info['rev_locked'] == repo_info['rev']
-            dep_info['rev_match'] = rev_match
-            
-            # Check if rev_locked behind origin/main (precise Git check)
-            try:
-                repo = Repo(root / dep_path)
-                if hasattr(repo.remotes, 'origin'):
-                    repo.remotes.origin.fetch()
-                # Find origin/main or origin/HEAD
-                remote_ref_name = None
-                remote_ref = None
-                for ref_name in ['origin/main', 'origin/HEAD']:
-                    try:
-                        remote_ref = repo.refs[ref_name]
-                        remote_ref_name = ref_name
-                        break
-                    except IndexError:
-                        continue
-                if remote_ref and dep_info['rev_locked']:
-                    # Check if rev_locked..remote_ref has commits (behind)
-                    behind_commits = list(repo.iter_commits(f"{dep_info['rev_locked']}..{remote_ref.name}"))
-                    behind_main = len(behind_commits) > 0
-            except (GitCommandError, ValueError):  # No repo/rev
-                pass
-        else:
-            dep_info['rev_match'] = False
-        dep_info['behind_main'] = behind_main
-    
-    # For repos: Check if in config deps
-    for repo_path_str, repo_info in repos['repos'].items():
-        repo_info['in_config'] = repo_path_str in config_deps
-    
-    return configs, repos
+    repos_map = repos.get('repos', {})
+    all_dep_paths = set()
+    for config_entry in configs.get('configs', {}).values():
+        for dep_path_str, dep_info in config_entry.get('deps', {}).items():
+            all_dep_paths.add(dep_path_str)
+            in_repos = dep_path_str in repos_map
+            dep_info['in_repos'] = in_repos
 
-@timeit
-def find_all_git_repos1(root: Path) -> Dict[str, Any]:
-    """
-    Find all Git repos under root, fetch upstream, and detect updates/uncommitted/unpushed.
-    Returns: {
-        'repos': {
-            repo_path: str (relative): {
-                'project_root': Path,
-                'revision': str (full HEAD SHA),
-                'short_revision': str (7 chars),
-                'remote_url': str or None,
-                'tags': List[str],
-                'current_tag': str or None,
-                'current_branch': str,
-                'has_update': bool (on current branch post-fetch),
-                'update_details': Dict{'branch': str, 'latest_hash': str, 'datetime': str, 'message': str} or None,
-                'has_update_main': bool (if current != 'main'),
-                'update_details_main': Dict[...] or None,
-                'has_uncommitted': bool,
-                'uncommitted_files': List[str] (relative paths if dirty),
-                'has_unpushed': bool (commits ahead of origin),
-                'unpushed_count': int
-            }
-        }
-    }
-    """
-    
-    repos = {}
-    for repo_path in root.rglob(".git"):
-        if repo_path.is_dir():
-            git_root = repo_path.parent
-            try:
-                repo = Repo(git_root)
-                
-                revision = repo.head.commit.hexsha
-                short_revision = revision[:7]
-                remote_url = repo.remotes.origin.url if hasattr(repo.remotes, 'origin') else None
-                tags = [t.name for t in repo.tags]
-                current_tag = (
-                    repo.head.ref.name.replace("refs/tags/", "")
-                    if repo.head.ref and repo.head.ref.name.startswith("refs/tags/")
-                    else None
-                )
-                current_branch = repo.active_branch.name if repo.head.is_detached else repo.head.ref.name.split('/')[-1]
+            rev_match = False
+            behind_main = False
+            if in_repos:
+                repo_info = repos_map[dep_path_str]
+                rev_match = dep_info['rev_locked'] == repo_info['rev']
 
-                # Fetch upstream (origin)
-                if hasattr(repo.remotes, 'origin'):
-                    repo.remotes.origin.fetch()
-                else:
-                    current_branch = None  # No updates/unpushed possible
-
-                # Check updates on current branch
-                has_update = False
-                update_details = None
-                if current_branch:
-                    try:
-                        origin_ref = repo.refs[f"origin/{current_branch}"]
-                        latest_hash = origin_ref.commit.hexsha
-                        if revision != latest_hash:
-                            has_update = True
-                            commit = origin_ref.commit
-                            update_details = {
-                                "branch": current_branch,
-                                "latest_hash": latest_hash,
-                                "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                                "message": commit.message.split('\n')[0]  # First line
-                            }
-                    except IndexError:
-                        pass  # No origin/<branch> ref
-
-                # Additional check for main if current != 'main'
-                has_update_main = False
-                update_details_main = None
-                if current_branch and current_branch != "main":
-                    for main_branch in ["main", "master"]:  # Fallback
+                # Check if rev_locked behind origin/main (precise Git check)
+                try:
+                    repo = Repo(root / dep_path_str)
+                    if hasattr(repo.remotes, 'origin'):
+                        repo.remotes.origin.fetch()
+                    # Find origin/main or origin/HEAD
+                    remote_ref = None
+                    for ref_name in ['origin/main', 'origin/HEAD']:
                         try:
-                            main_ref = repo.refs[main_branch]
-                            origin_main_ref = repo.refs[f"origin/{main_branch}"]
-                            if main_ref.commit.hexsha != origin_main_ref.commit.hexsha:
-                                has_update_main = True
-                                commit = origin_main_ref.commit
-                                update_details_main = {
-                                    "branch": main_branch,
-                                    "latest_hash": origin_main_ref.commit.hexsha,
-                                    "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                                    "message": commit.message.split('\n')[0]
-                                }
-                                break
-                        except (IndexError, AttributeError):
+                            remote_ref = repo.refs[ref_name]
+                            break
+                        except IndexError:
                             continue
+                    if remote_ref and dep_info['rev_locked']:
+                        # Check if rev_locked..remote_ref has commits (behind)
+                        behind_commits = list(repo.iter_commits(f"{dep_info['rev_locked']}..{remote_ref.name}"))
+                        behind_main = len(behind_commits) > 0
+                except (GitCommandError, ValueError):  # No repo/rev
+                    pass
+            dep_info['rev_match'] = rev_match
+            dep_info['behind_main'] = behind_main
 
-                # New: Uncommitted changes
-                has_uncommitted = repo.is_dirty()
-                uncommitted_files = []
-                if has_uncommitted:
-                    # Untracked
-                    uncommitted_files.extend(repo.untracked_files)
-                    # Staged/unstaged diffs
-                    uncommitted_files.extend([diff.a_path for diff in repo.index.diff(None)])
-                    uncommitted_files.extend([diff.a_path for diff in repo.index.diff("HEAD")])
+    # For repos: Check if declared as a dep in any config
+    for repo_path_str, repo_info in repos_map.items():
+        repo_info['in_config'] = repo_path_str in all_dep_paths
 
-                # New: Unpushed commits (local ahead)
-                has_unpushed = False
-                unpushed_count = 0
-                if current_branch and hasattr(repo.remotes, 'origin'):
-                    try:
-                        unpushed_commits = list(repo.iter_commits(f"origin/{current_branch}..HEAD"))
-                        unpushed_count = len(unpushed_commits)
-                        has_unpushed = unpushed_count > 0
-                    except IndexError:
-                        pass  # No origin ref
-
-                project_root_short = git_root.relative_to(root)
-                repos[str(project_root_short)] = {
-                    "name": str(project_root_short.name) if project_root_short.name else ".",
-                    "project_root": str(project_root_short),
-                    "revision": revision,
-                    "short_revision": short_revision,
-                    "remote_url": remote_url,
-                    "tags": tags,
-                    "current_tag": current_tag,
-                    "current_branch": current_branch,
-                    "has_update": has_update,
-                    "update_details": update_details,
-                    "has_update_main": has_update_main,
-                    "update_details_main": update_details_main,
-                    "has_uncommitted": has_uncommitted,
-                    "uncommitted_files": uncommitted_files,
-                    "has_unpushed": has_unpushed,
-                    "unpushed_count": unpushed_count,
-                    "configs" : [],
-                }
-            except Exception as e:
-                click.echo(click.style(f"  {repo_path}: Error ({e})", fg="red"))
-    res = {
-        "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "repos": repos
-    }
-    return res
-
+    return configs, repos
 
 def is_git_repo(path: Path) -> bool:
     """Check if path is a Git repo."""
     try:
         Repo(str(path), search_parent_directories=False)
         return True
-    except:
+    except Exception:
         return False
     
-def get_cashed_configs(root,CACHE_GIT_REPOS, CACHE_CONFIGS):
-    loaded_configs = yaml.safe_load(open(root/ CACHE_CONFIGS))
-    git_repos = yaml.safe_load(open( root / CACHE_GIT_REPOS))
-    print(f"✅ Loaded cached configs from {str(root/ CACHE_CONFIGS)}") 
+def get_cached_configs(root, CACHE_GIT_REPOS, CACHE_CONFIGS):
+    with open(root / CACHE_CONFIGS) as f:
+        loaded_configs = yaml.safe_load(f)
+    with open(root / CACHE_GIT_REPOS) as f:
+        git_repos = yaml.safe_load(f)
+    print(f"✅ Loaded cached configs from {str(root/ CACHE_CONFIGS)}")
     print(f"✅ Loaded cached git status from {str(root/ CACHE_GIT_REPOS)}")
     return loaded_configs, git_repos
 
@@ -869,21 +651,6 @@ def get_all_requirements(config: Config, recursive: bool = False) -> List[Dict[s
     return reqs
 
 
-def scan_gitman_projects(root: Path, scan_depth: int = float("inf")) -> List[tuple[Path, Config]]:
-    """Scan for Gitman projects (now uses load_all_configs for loading)."""
-    projects = []
-    loaded = find_all_configs(root)
-    for config_path_str, data in loaded["configs"].items():
-        config_path = Path(config_path_str)
-        project_root = data["project_root"]
-        if is_git_repo(project_root):
-            try:
-                config = Config.load(config_path)
-                projects.append((project_root, config))
-            except Exception as e:
-                click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"))
-    return projects
-
 def find_nested_configs(base_path: Path, depth: int = float("inf")) -> List[Path]:
     """Find nested .gitman.yml files (simple walker; max depth to avoid cycles)."""
     configs = []
@@ -899,7 +666,7 @@ def find_nested_configs(base_path: Path, depth: int = float("inf")) -> List[Path
 def get_configs_and_repos(root: Path, use_cache: bool = False):
     """Get configs and git repos, using cache if specified."""
     if use_cache:
-        loaded_configs, git_repos = get_cashed_configs(
+        loaded_configs, git_repos = get_cached_configs(
             root, CACHE_GIT_REPOS, CACHE_CONFIGS)
 
     else:
@@ -908,7 +675,7 @@ def get_configs_and_repos(root: Path, use_cache: bool = False):
         print(f"✅ find_all_git_repos: Found {num_repos} repos")
         
         loaded_configs, git_repos = find_all_configs(root, git_repos)
-        # num_configs = len(loaded_configs["configs"])
+        loaded_configs, git_repos = analyze_configs_repos(loaded_configs, git_repos, root)
         cache_conf_file = root / CACHE_CONFIGS
         with open(cache_conf_file, "w") as f:
             yaml.safe_dump(loaded_configs, f,

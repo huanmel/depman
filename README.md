@@ -35,9 +35,10 @@ depman/
 │   │   ├── checker.py       # check and list commands + display logic
 │   │   └── gm_commands.py   # gitman API wrappers
 │   └── utils/
+│       ├── __init__.py
 │       └── configs.py       # repo/config scanning and analysis
 └── tests/
-    └── test_depman.py
+    └── test_depman.py       # pytest suite (scanning + CLI smoke tests)
 ```
 
 ## Usage
@@ -54,6 +55,8 @@ depman list                # text summary of all repos and configs
 depman list -d             # show only dirty repos
 depman gm install <name>   # gitman install wrapper
 depman gm update <name>    # gitman update wrapper
+depman gm lock <name>      # gitman lock wrapper
+depman gm uninstall        # gitman uninstall wrapper
 depman --root /path check  # override auto-detected git root
 ```
 
@@ -77,22 +80,22 @@ After the table prints, enter a repo number to inspect it:
 ## Limitations
 
 - **Terminal mode is Windows-only** — uses `wt.exe`; no Linux/macOS equivalent implemented yet
-- Caching writes `.cache_git_repos.yaml` and `.cache_configs.yaml` to the project root
-- Update mode only handles top-level config deps (nested config updates not yet wired)
-- `pyperclip` is used for clipboard in list mode but not listed in `pyproject.toml`
+- Caching writes `.cache_git_repos.yaml` and `.cache_configs.yaml` to the project root (ignored by git)
+- Parallel repo fetching not yet implemented (scanning is sequential, slow on large trees)
 
 ## TODO / Future work
 
 - [ ] Cross-platform terminal support (Linux: `gnome-terminal`/`konsole`, macOS: `Terminal.app`/`iTerm2`)
-- [ ] Fix `pyperclip` missing from `pyproject.toml` dependencies
-- [ ] Multi-digit index entry in list mode (currently breaks for repos #10+)
-- [ ] Wire `analyze_configs_repos` into the main `check` flow for config↔repo rev-match reporting
-- [ ] Remove dead code: `find_all_git_repos1` (old implementation) and unused `scan_gitman_projects`
 - [ ] Parallel repo fetching (currently sequential, slow on large trees)
-- [ ] Update mode: support nested configs, not only top-level `.` config
-- [ ] Tests: expand coverage for `find_all_git_repos`, `find_all_configs`, and table rendering
-- [ ] `depman gm lock` and `depman gm uninstall` wrappers
-- [ ] Config revision mismatch report in `check` output (highlight deps where `rev_locked` ≠ installed SHA)
+
+## Recently fixed
+
+- Update mode now searches all loaded configs (root and nested) for a dep's owning config, instead of only the root `.` config
+- `analyze_configs_repos` is wired into the `check`/`list` flow; `rev_match`/`behind_main`/`in_repos` are computed for every config dep, and deps behind `origin/main` are reported in `list` output
+- `pyperclip` and `pyyaml` added to `pyproject.toml` dependencies (previously missing, breaking a fresh install)
+- Removed dead code: `find_all_git_repos1`, `scan_gitman_projects`, `depman/core/` (unused empty package)
+- Real pytest suite covering `find_all_git_repos`, `find_all_configs`, and CLI `check`/`list` invocation
+- `depman gm lock` and `depman gm uninstall` wrappers added
 
 ## Development
 

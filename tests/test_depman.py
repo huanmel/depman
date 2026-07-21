@@ -1,55 +1,74 @@
-#!/usr/bin/env python3
-"""
-Debug harness for check_updates_cmd (VS Code-friendly).
-Run via launch.json: Passes --test-path /path --use-cache True
-Coerces use_cache to bool; adds prints for step-debug.
-"""
+"""Tests for depman's git/config scanning and CLI commands."""
 
-import argparse
-import click
-import traceback
 from pathlib import Path
+
+import pytest
+import yaml
 from click.testing import CliRunner
-from depman.cli import cli  # CLI group for ctx sim
-from depman.commands.checker import check_updates_cmd  # Your callback
+from git import Repo
 
-def create_mock_ctx(root: str = ".") -> click.Context:
-    """Mock ctx with obj['root'] set."""
-    ctx = click.Context(cli, info_name="depman")
-    ctx.ensure_object(dict)
-    ctx.obj["root"] = Path(root).resolve()
-    return ctx
+from depman.cli import cli
+from depman.utils.configs import find_all_configs, find_all_git_repos
 
-def test_check_updates_command():
-    parser = argparse.ArgumentParser(description="Debug Checker Functions")
-    parser.add_argument("--test-path", type=str, default=".", help="Git root path")
-    parser.add_argument("--use-cache", type=str, default=None, help="Cache mode (any value → True)")
-    
-    args = parser.parse_args()
-    
-    # Fix: Coerce to bool (handles "True"/"true"/any str → True; None → False)
-    use_cache_bool = bool(args.use_cache) if args.use_cache else False
-    
-    root = args.test_path
-    print(f"🔍 Debug Start: Root={root}, use_cache={use_cache_bool} (type: {type(use_cache_bool)})")
-    
-    # ctx = create_mock_ctx(root)
-    
-    # cli(root=root)  # Ensure CLI context setup if needed
-    # cli({},root) # Explicitly pass an initial object for ctx.obj
-    try:
-        # Direct call (ctx first, then kwargs matching sig)
-        check_updates_cmd.make_context("check_updates", [root])
-        check_updates_cmd.invoke(ctx)  # Add ,recursive=False if needed
-        print("✅ Debug: Command ran (check terminal for CLI output).")
-    except Exception as e:
-        print(f"❌ Debug error: {e}")
-        traceback.print_exc()
-        # Optional: VS Code breakpoint here ^ for inspect
 
-if __name__ == "__main__":
-    # test_check_updates_command()
-    root = r'C:\Users\ivanm\Documents\MATLAB\EKL\deps_tests\gitman_proj_test'
-    cli(['--root', root, 'check-updates', '--use-cache'])
-    # runner = CliRunner()
-    # result = runner.invoke(cli, ['--root', root, 'check_updates', '--use-cache'])
+def _init_repo(path: Path) -> Repo:
+    path.mkdir(parents=True, exist_ok=True)
+    repo = Repo.init(path)
+    (path / "README.md").write_text("hello\n")
+    repo.index.add(["README.md"])
+    repo.index.commit("initial commit")
+    if repo.active_branch.name != "main":
+        repo.git.branch("-m", "main")
+    return repo
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    """A root git repo with one nested dep repo tracked by a root gitman.yml."""
+    root = tmp_path / "project"
+    dep = root / "deps" / "widget"
+
+    _init_repo(root)
+    _init_repo(dep)
+
+    gitman_yml = {
+        "location": "deps",
+        "sources": [
+            {"name": "widget", "repo": str(dep), "rev": "main"},
+        ],
+    }
+    (root / "gitman.yml").write_text(yaml.safe_dump(gitman_yml))
+
+    return root
+
+
+def _dep_key() -> str:
+    return str(Path("deps") / "widget")
+
+
+def test_find_all_git_repos_finds_root_and_nested(project: Path):
+    result = find_all_git_repos(project)
+    assert "." in result["repos"]
+    assert _dep_key() in result["repos"]
+
+
+def test_find_all_configs_flattens_deps(project: Path):
+    repos = find_all_git_repos(project)
+    configs, repos = find_all_configs(project, repos)
+    assert "." in configs["configs"]
+    deps = configs["configs"]["."]["deps"]
+    assert any(dep_info["name"] == "widget" for dep_info in deps.values())
+
+
+def test_cli_list_runs_against_scanned_project(project: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "list"])
+    assert result.exit_code == 0, result.output
+    assert "Repos Summary" in result.output
+
+
+def test_cli_check_runs_against_scanned_project(project: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "check"])
+    assert result.exit_code == 0, result.output
+    assert "Git Repos Status" in result.output

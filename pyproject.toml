@@ -10,10 +10,16 @@ version = "0.1.0"
 description = "CLI extension for Gitman: Wraps commands and checks for dependency updates"
 readme = "README.md"
 authors = [{ name = "Ivan MeL" }]
+requires-python = ">=3.10"
 dependencies = ["click >= 8.0",
             "gitman>=0.11.0",
             "gitpython>=3.1.0","tqdm>=4.64.0",
-            "rich>=13.3.0"]
+            "rich>=13.3.0",
+            "pyperclip>=1.8.0",
+            "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "flake8"]
 
 [project.scripts]
 depman = "depman.cli:cli"

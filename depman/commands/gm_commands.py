@@ -2,7 +2,6 @@
 Gm subcommand: gitman wrapper via API.
 """
 
-import inspect
 import click
 from gitman import install, update, list as list_deps, lock, uninstall, init
 
@@ -49,5 +48,18 @@ def gm_list(ctx: click.Context, depth):
     list_deps(root=root, depth=depth)
 
 
-# Add more: lock, uninstall, etc.
-# For full arg mapping, inspect gitman funcs dynamically if needed.
+@gm.command("lock")
+@click.argument("names", nargs=-1)
+@click.pass_context
+def gm_lock(ctx: click.Context, names):
+    root = ctx.obj["root"]
+    lock(*names, root=root)
+
+
+@gm.command("uninstall")
+@click.option("--force", is_flag=True)
+@click.option("--keep-location", is_flag=True)
+@click.pass_context
+def gm_uninstall(ctx: click.Context, force, keep_location):
+    root = ctx.obj["root"]
+    uninstall(root=root, force=force, keep_location=keep_location)

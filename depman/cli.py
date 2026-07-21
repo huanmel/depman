@@ -21,10 +21,7 @@ from .utils.configs import find_git_root
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 
 @click.group(context_settings=CONTEXT_SETTINGS)
-
 @click.option("--root", type=str, default=None, help="Git root path (auto-detects).")
-# def cli(root: Optional[str]):
-#     pass
 @click.pass_context
 def cli(ctx: click.Context, root: Optional[str]):
     """Depman: Enhance Gitman dependency management."""
