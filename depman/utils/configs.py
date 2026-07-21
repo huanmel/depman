@@ -1,11 +1,12 @@
 from typing import Optional
 from datetime import datetime  # Add if not present (for res['datetime'])
+import sys
 import time
 from functools import wraps
 import click
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from depman import CONFIG_NAME, CACHE_GIT_REPOS, CACHE_CONFIGS   
+from depman import CONFIG_NAME, CACHE_GIT_REPOS, CACHE_CONFIGS
 import yaml  # For manual YAML loads
 from git import Repo, GitCommandError
 from gitman.models import Config
@@ -29,7 +30,7 @@ def timeit(func):
         end_time = time.perf_counter()
         total_time = end_time - start_time
         # first item in the args, ie `args[0]` is `self`
-        print(f'Function: {func.__name__} \nTimeit: {total_time:.4f} sec')
+        print(f'Function: {func.__name__} \nTimeit: {total_time:.4f} sec', file=sys.stderr)
         return result
     return timeit_wrapper
 
@@ -611,8 +612,8 @@ def get_cached_configs(root, CACHE_GIT_REPOS, CACHE_CONFIGS):
         loaded_configs = yaml.safe_load(f)
     with open(root / CACHE_GIT_REPOS) as f:
         git_repos = yaml.safe_load(f)
-    print(f"✅ Loaded cached configs from {str(root/ CACHE_CONFIGS)}")
-    print(f"✅ Loaded cached git status from {str(root/ CACHE_GIT_REPOS)}")
+    print(f"✅ Loaded cached configs from {str(root/ CACHE_CONFIGS)}", file=sys.stderr)
+    print(f"✅ Loaded cached git status from {str(root/ CACHE_GIT_REPOS)}", file=sys.stderr)
     return loaded_configs, git_repos
 
 def print_project_tree(config: Config, root_path: Path, prefix: str = ""):
@@ -675,20 +676,19 @@ def get_configs_and_repos(root: Path, use_cache: bool = False):
     else:
         git_repos = find_all_git_repos(root)
         num_repos = len(git_repos["repos"])
-        print(f"✅ find_all_git_repos: Found {num_repos} repos")
-        
+        print(f"✅ find_all_git_repos: Found {num_repos} repos", file=sys.stderr)
+
         loaded_configs, git_repos = find_all_configs(root, git_repos)
         loaded_configs, git_repos = analyze_configs_repos(loaded_configs, git_repos, root)
         cache_conf_file = root / CACHE_CONFIGS
         with open(cache_conf_file, "w") as f:
             yaml.safe_dump(loaded_configs, f,
                            default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped loaded_configs to {cache_conf_file}")
-
+        print(f"✅ Dumped loaded_configs to {cache_conf_file}", file=sys.stderr)
 
         cache_repos_file = root / CACHE_GIT_REPOS
         with open(cache_repos_file, "w") as f:
             yaml.safe_dump(
                 git_repos, f, default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped git_repos to {cache_repos_file}")
+        print(f"✅ Dumped git_repos to {cache_repos_file}", file=sys.stderr)
     return loaded_configs, git_repos

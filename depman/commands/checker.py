@@ -2,6 +2,8 @@
 Update checker using Gitman API + GitPython.
 """
 
+import json
+
 import click
 
 from depman.commands.review import ORDER_CHOICES, ORDER_HELP, run_review
@@ -52,6 +54,14 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
     "(see 'depman review --help'); reuses this scan instead of rescanning.",
 )
 @click.option("--order", type=click.Choice(ORDER_CHOICES), default="root-last", help=ORDER_HELP)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="print the scan as a single JSON document on stdout instead of the status table "
+    "(all diagnostic/progress output goes to stderr). Machine/agent-friendly.",
+)
 @click.pass_context
 def check_cmd(
     ctx: click.Context,
@@ -61,10 +71,14 @@ def check_cmd(
     terminal_mode: bool,
     review: bool,
     order: str,
+    as_json: bool,
 ):
     """Check for upstream updates in Gitman dependencies (now scans all projects)."""
     root = ctx.obj["root"]
     loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache)
+    if as_json:
+        click.echo(json.dumps({"configs": loaded_configs, "repos": git_repos}, indent=2, default=str))
+        return
     print_check_table(loaded_configs, git_repos, root=root,update_mode=update_mode,list_mode=list_mode,list_open_terminal=terminal_mode)
     if review:
         run_review(root, git_repos, order=order)
@@ -79,9 +93,20 @@ def check_cmd(
     help="use cached YAML files instead of live scan (path to root).",
 )
 @click.option("--dirty", "-d", is_flag=True, default=False, help="print only dirty.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="print the scan as a single JSON document on stdout instead of the text summary "
+    "(all diagnostic/progress output goes to stderr). Machine/agent-friendly.",
+)
 @click.pass_context
-def list_cmd(ctx: click.Context, use_cache: bool, dirty: bool):
+def list_cmd(ctx: click.Context, use_cache: bool, dirty: bool, as_json: bool):
     """List all Git/Gitman projects under root."""
     root = ctx.obj["root"]
     loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache)
+    if as_json:
+        click.echo(json.dumps({"configs": loaded_configs, "repos": git_repos}, indent=2, default=str))
+        return
     print_list_configs_repos(loaded_configs, git_repos, only_dirty=dirty)

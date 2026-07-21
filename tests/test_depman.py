@@ -1,5 +1,6 @@
 """Tests for depman's git/config scanning and CLI commands."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,31 @@ def test_cli_check_runs_against_scanned_project(project: Path):
     assert "Git Repos Status" in result.output
 
 
+def test_cli_check_json_prints_clean_json_on_stdout(project: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "check", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)
+    assert "." in payload["repos"]["repos"]
+    assert "." in payload["configs"]["configs"]
+    # diagnostic/progress noise must not leak onto stdout
+    assert "find_all_git_repos" not in result.stdout
+    assert "Dumped" not in result.stdout
+    # ...but it's still there, just on stderr
+    assert "find_all_git_repos" in result.stderr
+
+
+def test_cli_list_json_prints_clean_json_on_stdout(project: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "list", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)
+    assert "." in payload["repos"]["repos"]
+    assert "." in payload["configs"]["configs"]
+
+
 def test_review_reports_clean_when_no_changes(project: Path):
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(project), "review"])
@@ -111,6 +137,8 @@ def test_review_commit_commits_dirty_repo(project: Path):
     (project / "README.md").write_text("changed\n")
     runner = CliRunner()
     # c (commit) -> confirm file list (blank = yes) -> commit message (blank = default)
+    # (project fixture has no 'origin' remote, so the post-commit push attempt
+    # just prints an error and consumes no further input)
     result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n")
     assert result.exit_code == 0, result.output
     assert "About to commit:" in result.output
@@ -176,6 +204,8 @@ def test_review_diff_then_commit(project: Path):
     (project / "README.md").write_text("changed\n")
     runner = CliRunner()
     # d (diff) -> blank (all files) -> c (commit) -> confirm blank -> message blank
+    # (project fixture has no 'origin' remote, so the post-commit push attempt
+    # just prints an error and consumes no further input)
     result = runner.invoke(cli, ["--root", str(project), "review"], input="d\n\nc\n\n\n")
     assert result.exit_code == 0, result.output
     assert "diff --git" in result.output
@@ -204,6 +234,103 @@ def test_review_use_cache_skips_rescan(project: Path):
     assert "Loaded cached git status" in result.output
     assert "Committed ." in result.output
     assert not Repo(project).is_dirty()
+
+
+def test_review_push_without_remote_reports_error(project: Path):
+    (project / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="p\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "no 'origin' remote" in result.output
+    assert "Skipped ." in result.output
+
+
+def test_review_push_pushes_existing_unpushed_commit(tmp_path: Path):
+    root = tmp_path / "proj"
+    bare = tmp_path / "origin.git"
+    Repo.init(bare, bare=True)
+    repo = _init_repo(root)
+    repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
+    # a local commit the remote doesn't have yet
+    (root / "README.md").write_text("second commit\n")
+    repo.git.add(A=True)
+    repo.index.commit("second commit")
+    # plus an uncommitted change so the repo shows up in review at all
+    (root / "README.md").write_text("second commit\nworking change\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="p\ny\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "Commits to push (1):" in result.output
+    assert "second commit" in result.output
+    assert "Pushed ." in result.output
+    assert Repo(bare).commit("main").message.strip() == "second commit"
+
+
+def test_review_commit_then_push_now(tmp_path: Path):
+    root = tmp_path / "proj"
+    bare = tmp_path / "origin.git"
+    Repo.init(bare, bare=True)
+    repo = _init_repo(root)
+    repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
+    (root / "README.md").write_text("changed\n")
+
+    runner = CliRunner()
+    # c -> confirm blank(yes) -> message blank -> push confirm "y"
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\n\n\ny\n")
+    assert result.exit_code == 0, result.output
+    assert "Committed ." in result.output
+    assert "Commits to push (1):" in result.output
+    assert "Pushed ." in result.output
+    assert Repo(bare).commit("main").message.strip() == "wip: ."
+
+
+def test_review_includes_clean_repo_with_only_unpushed_commits(tmp_path: Path):
+    """A repo with a clean working tree but unpushed commits must still show up in review."""
+    root = tmp_path / "proj"
+    bare = tmp_path / "origin.git"
+    Repo.init(bare, bare=True)
+    repo = _init_repo(root)
+    repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
+    (root / "README.md").write_text("second commit\n")
+    repo.git.add(A=True)
+    repo.index.commit("second commit")
+    assert not repo.is_dirty(untracked_files=True)  # working tree is clean
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="\ny\n")
+    assert result.exit_code == 0, result.output
+    assert "Working tree clean" in result.output
+    # default choice for a clean-but-unpushed repo is 'p', so blank input pushes it
+    assert "Commits to push (1):" in result.output
+    assert "Pushed ." in result.output
+    assert Repo(bare).commit("main").message.strip() == "second commit"
+
+
+def test_review_clean_repo_commit_and_revert_are_no_ops(tmp_path: Path):
+    root = tmp_path / "proj"
+    bare = tmp_path / "origin.git"
+    Repo.init(bare, bare=True)
+    repo = _init_repo(root)
+    repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
+    (root / "README.md").write_text("second commit\n")
+    repo.git.add(A=True)
+    repo.index.commit("second commit")
+
+    runner = CliRunner()
+    # c -> "Nothing to commit" -> loop back -> r -> "Nothing to revert" -> loop back -> s (skip)
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\nr\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "Nothing to commit." in result.output
+    assert "Nothing to revert." in result.output
+    assert "Skipped ." in result.output
+    # commit/revert were no-ops and we never pushed, so the bare remote
+    # still only has the initial commit
+    assert [c.message.strip() for c in Repo(bare).iter_commits("main")] == ["initial commit"]
 
 
 def test_review_order_root_last_processes_dep_before_root(project: Path):

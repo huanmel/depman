@@ -1,13 +1,15 @@
 """
-Review subcommand: semi-automatic per-repo commit/revert workflow.
+Review subcommand: semi-automatic per-repo commit/revert/push workflow.
 
-Walks every repo with uncommitted changes (root and nested deps), shows a
-compact list of changed files, and asks for a per-repo decision. Full diffs
-are shown on demand ("d") rather than dumped up front, since large repos can
-generate a lot of diff output. "Revert" never hard-deletes: it stashes the
-changes (including untracked files) under a labeled stash so they can always
-be recovered with `git stash pop`. `run_review` is shared with `depman check
--r`, which reuses the scan `check` already did instead of rescanning.
+Walks every repo that needs attention (root and nested deps) -- either it has
+uncommitted changes, or it's clean but has commits not yet pushed to origin --
+shows a compact list of changed files, and asks for a per-repo decision. Full
+diffs are shown on demand ("d") rather than dumped up front, since large
+repos can generate a lot of diff output. "Revert" never hard-deletes: it
+stashes the changes (including untracked files) under a labeled stash so
+they can always be recovered with `git stash pop`. `run_review` is shared
+with `depman check -r`, which reuses the scan `check` already did instead of
+rescanning.
 """
 from datetime import datetime
 from pathlib import Path
@@ -85,7 +87,8 @@ def _show_diff_menu(repo: Repo, files: List[Tuple[str, str]]) -> None:
         click.echo(_diff_for_file(repo, path))
 
 
-def _commit_repo(repo: Repo, repo_path: str, files: List[Tuple[str, str]]) -> None:
+def _commit_repo(repo: Repo, repo_path: str, files: List[Tuple[str, str]]) -> bool:
+    """Returns True if a commit was made, False if the user cancelled."""
     new_files = [path for code, path in files if code.strip() in ("??", "A")]
     click.echo(click.style("About to commit:", fg="green"))
     _print_file_list(files)
@@ -94,11 +97,63 @@ def _commit_repo(repo: Repo, repo_path: str, files: List[Tuple[str, str]]) -> No
             f"  ({len(new_files)} new/untracked file(s) will be added)", fg="yellow"))
     if not click.confirm(f"Commit all {len(files)} file(s) in {repo_path}?", default=True):
         click.echo("Cancelled.")
-        return
+        return False
     message = click.prompt("Commit message", default=f"wip: {repo_path}")
     repo.git.add(A=True)
     repo.index.commit(message)
     click.echo(click.style(f"✅ Committed {repo_path}: {message}", fg="green"))
+    return True
+
+
+def _unpushed_commits(repo: Repo, branch: str) -> List:
+    """Commits on `branch` not yet on `origin/branch` (best-effort fetch first for accuracy)."""
+    try:
+        repo.remotes.origin.fetch()
+    except GitCommandError:
+        pass  # offline/unreachable; fall back to whatever we already know locally
+
+    remote_ref = f"origin/{branch}"
+    try:
+        repo.refs[remote_ref]
+    except IndexError:
+        return list(repo.iter_commits(branch))  # branch was never pushed before
+    return list(repo.iter_commits(f"{remote_ref}..{branch}"))
+
+
+def _print_unpushed_commits(commits: List) -> None:
+    if not commits:
+        click.echo(click.style("  (no new commits to push)", fg="yellow"))
+        return
+    click.echo(click.style(f"Commits to push ({len(commits)}):", fg="yellow"))
+    for commit in commits:
+        click.echo(f"  {commit.hexsha[:7]}  {commit.message.splitlines()[0]}")
+
+
+def _push_repo(repo: Repo, repo_path: str) -> None:
+    if not hasattr(repo.remotes, "origin"):
+        click.echo(click.style(f"❌ {repo_path} has no 'origin' remote configured.", fg="red"))
+        return
+    if repo.head.is_detached:
+        click.echo(click.style(
+            f"❌ {repo_path} is in detached HEAD state; check out a branch before pushing.",
+            fg="red"))
+        return
+    branch = repo.active_branch.name
+    commits = _unpushed_commits(repo, branch)
+    _print_unpushed_commits(commits)
+    if not commits:
+        return
+    if not click.confirm(f"Push {repo_path} ({branch}) to origin?", default=False):
+        click.echo("Cancelled.")
+        return
+    try:
+        output = repo.git.push("origin", branch)
+    except GitCommandError as e:
+        click.echo(click.style(f"❌ Push failed for {repo_path}: {e}", fg="red"))
+        return
+    click.echo(click.style(f"✅ Pushed {repo_path} ({branch}) to origin.", fg="green"))
+    if output:
+        click.echo(output)
 
 
 def _revert_repo(repo: Repo, repo_path: str) -> None:
@@ -114,25 +169,36 @@ def _revert_repo(repo: Repo, repo_path: str) -> None:
 
 
 def _review_repo(repo: Repo, repo_path: str) -> Optional[str]:
-    """Interact with the user about a single dirty repo. Returns 'quit' to stop the whole review."""
+    """Interact with the user about a single repo. Returns 'quit' to stop the whole review."""
     while True:
         click.echo(click.style(f"\n=== {repo_path} ===", bold=True, fg="cyan"))
         files = _changed_files(repo)
-        _print_file_list(files)
+        if files:
+            _print_file_list(files)
+        else:
+            click.echo(click.style(
+                "  Working tree clean — only unpushed commits here.", fg="yellow"))
 
         choice = click.prompt(
-            "commit / revert / diff / skip / quit",
-            type=click.Choice(["c", "r", "d", "s", "q"]),
-            default="s",
+            "commit / revert / diff / push / skip / quit",
+            type=click.Choice(["c", "r", "d", "p", "s", "q"]),
+            default="p" if not files else "s",
             show_choices=True,
         )
 
         if choice == "q":
             return "quit"
         elif choice == "c":
-            _commit_repo(repo, repo_path, files)
+            if not files:
+                click.echo("Nothing to commit.")
+                continue
+            if _commit_repo(repo, repo_path, files):
+                _push_repo(repo, repo_path)
             return None
         elif choice == "r":
+            if not files:
+                click.echo("Nothing to revert.")
+                continue
             if click.confirm(
                 f"Really revert {repo_path}? Changes will be stashed (recoverable) "
                 "and the working tree reset to HEAD",
@@ -143,15 +209,23 @@ def _review_repo(repo: Repo, repo_path: str) -> Optional[str]:
                 click.echo("Cancelled.")
             return None
         elif choice == "d":
+            if not files:
+                click.echo("No changed files to diff.")
+                continue
             _show_diff_menu(repo, files)
             # loop back: re-show the (still up to date) file list and re-prompt
+        elif choice == "p":
+            _push_repo(repo, repo_path)
+            if not files:
+                return None  # nothing else to decide for a clean repo
+            # working tree is still dirty: loop back to decide its fate next
         else:
             click.echo(f"Skipped {repo_path}")
             return None
 
 
-def _ordered_dirty_paths(dirty_paths: Iterable[str], order: str) -> List[str]:
-    paths = sorted(dirty_paths)
+def _ordered_repo_paths(paths: Iterable[str], order: str) -> List[str]:
+    paths = sorted(paths)
     if order == "root-last" and "." in paths:
         paths.remove(".")
         paths.append(".")
@@ -160,16 +234,21 @@ def _ordered_dirty_paths(dirty_paths: Iterable[str], order: str) -> List[str]:
 
 def run_review(root: Path, git_repos: Dict[str, Any], order: str = "root-last") -> None:
     """Shared review workflow, usable from `depman review` and `depman check -r`."""
-    dirty = {
-        path: info for path, info in git_repos["repos"].items() if info["has_uncommitted"]
+    needs_review = {
+        path: info
+        for path, info in git_repos["repos"].items()
+        if info["has_uncommitted"] or info["has_unpushed"]
     }
-    if not dirty:
-        click.echo(click.style("✅ No uncommitted changes in any repo.", fg="green"))
+    if not needs_review:
+        click.echo(click.style(
+            "✅ No uncommitted changes or unpushed commits in any repo.", fg="green"))
         return
 
-    click.echo(click.style(f"\nFound {len(dirty)} repo(s) with uncommitted changes.", bold=True))
+    click.echo(click.style(
+        f"\nFound {len(needs_review)} repo(s) with uncommitted changes or unpushed commits.",
+        bold=True))
 
-    for repo_path in _ordered_dirty_paths(dirty.keys(), order):
+    for repo_path in _ordered_repo_paths(needs_review.keys(), order):
         repo = Repo(root / repo_path)
         if _review_repo(repo, repo_path) == "quit":
             click.echo("Stopping review.")
