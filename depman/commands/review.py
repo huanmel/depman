@@ -130,6 +130,42 @@ def _print_unpushed_commits(commits: List) -> None:
         click.echo(f"  {commit.hexsha[:7]}  {commit.message.splitlines()[0]}")
 
 
+def _squash_commit_message(commits: List) -> str:
+    """Combine each squashed commit's full message, oldest first, into one multiline message."""
+    return "\n\n".join(commit.message.strip() for commit in reversed(commits))
+
+
+def _squash_unpushed_commits(repo: Repo, repo_path: str, commits: List) -> bool:
+    """
+    Offer to squash `commits` -- exactly origin/<branch>..<branch>, i.e. commits not yet
+    on the remote -- into a single commit. Always safe to push normally afterward, since
+    none of these commits exist on origin yet (no rewriting of shared history). Returns
+    True if a squash happened.
+    """
+    if len(commits) < 2:
+        return False
+    oldest = commits[-1]
+    if not oldest.parents:
+        click.echo(click.style(
+            "Cannot squash: that would reach the repo's very first commit.", fg="red"))
+        return False
+
+    default_message = _squash_commit_message(commits)
+    click.echo(click.style(f"Combine these {len(commits)} commits into one:", fg="green"))
+    click.echo(default_message)
+    if not click.confirm(f"Squash {len(commits)} commits into one before pushing?", default=False):
+        return False
+
+    message = click.prompt(
+        "Commit message (blank = use combined message above)", default="", show_default=False
+    )
+    final_message = message.strip() or default_message
+    repo.git.reset("--soft", oldest.parents[0].hexsha)
+    repo.git.commit("-m", final_message)
+    click.echo(click.style(f"✅ Squashed {len(commits)} commits into one in {repo_path}.", fg="green"))
+    return True
+
+
 def _push_repo(repo: Repo, repo_path: str) -> None:
     if not hasattr(repo.remotes, "origin"):
         click.echo(click.style(f"❌ {repo_path} has no 'origin' remote configured.", fg="red"))
@@ -144,6 +180,11 @@ def _push_repo(repo: Repo, repo_path: str) -> None:
     _print_unpushed_commits(commits)
     if not commits:
         return
+
+    if len(commits) > 1 and _squash_unpushed_commits(repo, repo_path, commits):
+        commits = _unpushed_commits(repo, branch)
+        _print_unpushed_commits(commits)
+
     if not click.confirm(f"Push {repo_path} ({branch}) to origin?", default=False):
         click.echo("Cancelled.")
         return

@@ -359,6 +359,89 @@ def test_review_push_pushes_existing_unpushed_commit(tmp_path: Path):
     assert Repo(bare).commit("main").message.strip() == "second commit"
 
 
+def _repo_with_two_unpushed_commits(tmp_path: Path):
+    root = tmp_path / "proj"
+    bare = tmp_path / "origin.git"
+    Repo.init(bare, bare=True)
+    repo = _init_repo(root)
+    repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
+
+    (root / "README.md").write_text("first change\n")
+    repo.git.add(A=True)
+    repo.index.commit("first change")
+    (root / "README.md").write_text("first change\nsecond change\n")
+    repo.git.add(A=True)
+    repo.index.commit("second change")
+
+    return root, bare, repo
+
+
+def test_review_push_squash_combines_commits_with_default_message(tmp_path: Path):
+    root, bare, repo = _repo_with_two_unpushed_commits(tmp_path)
+
+    runner = CliRunner()
+    # p (push) -> squash confirm "y" -> message blank (use combined default) -> push confirm "y"
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="p\ny\n\ny\n")
+    assert result.exit_code == 0, result.output
+    assert "Combine these 2 commits into one:" in result.output
+    assert "Squashed 2 commits into one" in result.output
+
+    bare_repo = Repo(bare)
+    commits = list(bare_repo.iter_commits("main"))
+    assert len(commits) == 2  # initial commit + one squashed commit
+    assert commits[0].message.strip() == "first change\n\nsecond change"
+
+
+def test_review_push_squash_custom_message(tmp_path: Path):
+    root, bare, repo = _repo_with_two_unpushed_commits(tmp_path)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "review"], input="p\ny\nmy custom squash message\ny\n"
+    )
+    assert result.exit_code == 0, result.output
+
+    bare_repo = Repo(bare)
+    commits = list(bare_repo.iter_commits("main"))
+    assert len(commits) == 2
+    assert commits[0].message.strip() == "my custom squash message"
+
+
+def test_review_push_decline_squash_keeps_commits_separate(tmp_path: Path):
+    root, bare, repo = _repo_with_two_unpushed_commits(tmp_path)
+
+    runner = CliRunner()
+    # p (push) -> squash confirm "n" (decline) -> push confirm "y"
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="p\nn\ny\n")
+    assert result.exit_code == 0, result.output
+    assert "Squashed" not in result.output
+
+    bare_repo = Repo(bare)
+    commits = list(bare_repo.iter_commits("main"))
+    assert len(commits) == 3  # initial + first change + second change, unsquashed
+    assert commits[0].message.strip() == "second change"
+    assert commits[1].message.strip() == "first change"
+
+
+def test_review_push_single_commit_never_offers_squash(tmp_path: Path):
+    root = tmp_path / "proj"
+    bare = tmp_path / "origin.git"
+    Repo.init(bare, bare=True)
+    repo = _init_repo(root)
+    repo.create_remote("origin", str(bare))
+    repo.git.push("origin", "main")
+    (root / "README.md").write_text("second commit\n")
+    repo.git.add(A=True)
+    repo.index.commit("second commit")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="p\ny\n")
+    assert result.exit_code == 0, result.output
+    assert "Combine these" not in result.output
+    assert "Pushed ." in result.output
+
+
 def test_review_commit_then_push_now(tmp_path: Path):
     root = tmp_path / "proj"
     bare = tmp_path / "origin.git"
