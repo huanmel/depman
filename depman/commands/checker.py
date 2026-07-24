@@ -62,6 +62,13 @@ CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
     help="print the scan as a single JSON document on stdout instead of the status table "
     "(all diagnostic/progress output goes to stderr). Machine/agent-friendly.",
 )
+@click.option(
+    "--jobs",
+    "-j",
+    type=int,
+    default=8,
+    help="number of repos to fetch/scan concurrently during a live scan (default: 8).",
+)
 @click.pass_context
 def check_cmd(
     ctx: click.Context,
@@ -72,16 +79,17 @@ def check_cmd(
     review: bool,
     order: str,
     as_json: bool,
+    jobs: int,
 ):
     """Check for upstream updates in Gitman dependencies (now scans all projects)."""
     root = ctx.obj["root"]
-    loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache)
+    loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache, jobs=jobs)
     if as_json:
         click.echo(json.dumps({"configs": loaded_configs, "repos": git_repos}, indent=2, default=str))
         return
     print_check_table(loaded_configs, git_repos, root=root,update_mode=update_mode,list_mode=list_mode,list_open_terminal=terminal_mode)
     if review:
-        run_review(root, git_repos, order=order)
+        run_review(root, git_repos, order=order, configs=loaded_configs)
 
 
 @click.command(context_settings=CONTEXT_SETTINGS)
@@ -101,11 +109,18 @@ def check_cmd(
     help="print the scan as a single JSON document on stdout instead of the text summary "
     "(all diagnostic/progress output goes to stderr). Machine/agent-friendly.",
 )
+@click.option(
+    "--jobs",
+    "-j",
+    type=int,
+    default=8,
+    help="number of repos to fetch/scan concurrently during a live scan (default: 8).",
+)
 @click.pass_context
-def list_cmd(ctx: click.Context, use_cache: bool, dirty: bool, as_json: bool):
+def list_cmd(ctx: click.Context, use_cache: bool, dirty: bool, as_json: bool, jobs: int):
     """List all Git/Gitman projects under root."""
     root = ctx.obj["root"]
-    loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache)
+    loaded_configs, git_repos = get_configs_and_repos(root, use_cache=use_cache, jobs=jobs)
     if as_json:
         click.echo(json.dumps({"configs": loaded_configs, "repos": git_repos}, indent=2, default=str))
         return

@@ -62,7 +62,9 @@ depman review              # semi-auto commit/revert walkthrough of every dirty 
 depman review -c           # same, but reuse the last check/list scan snapshot (no rescan/fetch)
 depman check -r            # full status table first, then straight into review (reuses this scan)
 depman review --order root-first  # process root repo first instead of last
+depman review --order gitman      # process deps in gitman.yml declared order (reorder it to control this)
 depman check --json        # machine-readable status: single JSON document on stdout
+depman check -j 16         # scan/fetch up to 16 repos concurrently (default: 8)
 depman --root /path check  # override auto-detected git root
 ```
 
@@ -75,6 +77,16 @@ depman --root /path check  # override auto-detected git root
 | Unpushed | Local commits not yet pushed to origin |
 | Update | New commits available on the tracked remote branch |
 | Update Main | `main`/`master` branch has diverged from `origin/main` |
+
+Row order is deterministic: root (`.`) first, then each dep in the order it's
+declared in its owning `gitman.yml` — depth-first, so a dep that itself owns a
+nested `gitman.yml` is immediately followed by its own declared sub-deps,
+rather than having them appear at the end. Reorder a `gitman.yml`'s `sources`
+list to control this order (e.g. move a dep you want to handle first to the
+top). Repos found on disk but not declared in any config (a "did I forget to
+add this to gitman.yml?" case) are appended after, sorted alphabetically. This
+same ordering also drives `--order gitman` in `review`/`check -r` below, and
+list-mode's `select #:` index always matches the row numbers shown.
 
 ### Interactive list mode
 
@@ -107,8 +119,9 @@ Pass `-c`/`--use-cache` to skip the rescan (including the per-repo `fetch`) and 
 
 **Processing order** (`--order`, available on both `review` and `check -r`):
 
-- `root-last` (default) — nested dependency repos first, the root project repo last. Useful when the root's own state (e.g. `gitman.yml`, lockfiles) should be handled only after its dependencies have settled.
+- `root-last` (default) — nested dependency repos first (alphabetically), the root project repo last. Useful when the root's own state (e.g. `gitman.yml`, lockfiles) should be handled only after its dependencies have settled.
 - `root-first` — alphabetical order, root repo (`.`) first.
+- `gitman` — deps in the same depth-first, gitman.yml-declared order as the status table (see above), root last. Since you control that order just by reordering `sources` in `gitman.yml`, this is the one to use if you want "which repo do I commit/push first" to be something you can set explicitly rather than accepting alphabetical order — e.g. move a dep to the top of `gitman.yml` to make `review --order gitman` reach it first.
 
 ## Automation (scripts / LLM agents)
 
@@ -125,12 +138,14 @@ This is read-only status reporting — there's currently no non-interactive equi
 
 - **Terminal mode is Windows-only** — uses `wt.exe`; no Linux/macOS equivalent implemented yet
 - Caching writes `.cache_git_repos.yaml` and `.cache_configs.yaml` to the project root (ignored by git)
-- Parallel repo fetching not yet implemented (scanning is sequential, slow on large trees)
+
+## Performance
+
+A live scan (`check`/`list`/`review` without `-c`) fetches every discovered repo from its remote — on large dependency trees this is the dominant cost, not CPU work. Repos are fetched/scanned concurrently (default 8 at a time; tune with `-j`/`--jobs`). If your git server rate-limits concurrent connections, lower `-j`; if you have many repos and headroom, raise it. Cross-referencing repos against configs (`analyze_configs_repos`) reuses the same fetch `find_all_git_repos` just did rather than fetching again, so it adds no extra network time. Use `-c`/`--use-cache` to skip the network scan entirely and reuse the last snapshot when you don't need fresh remote state.
 
 ## TODO / Future work
 
 - [ ] Cross-platform terminal support (Linux: `gnome-terminal`/`konsole`, macOS: `Terminal.app`/`iTerm2`)
-- [ ] Parallel repo fetching (currently sequential, slow on large trees)
 
 ## Recently fixed
 
@@ -140,6 +155,9 @@ This is read-only status reporting — there's currently no non-interactive equi
 - Removed dead code: `find_all_git_repos1`, `scan_gitman_projects`, `depman/core/` (unused empty package)
 - Real pytest suite covering `find_all_git_repos`, `find_all_configs`, and CLI `check`/`list` invocation
 - `depman gm lock` and `depman gm uninstall` wrappers added
+- `analyze_configs_repos` no longer re-fetches every dep's remote (it was redundantly refetching what `find_all_git_repos` had just fetched); `find_all_git_repos` now scans/fetches repos concurrently (`-j`/`--jobs`, default 8) instead of one at a time
+- Status table / `list` row order is now deterministic (root first, then gitman.yml-declared depth-first order, undeclared repos last) instead of raw scan-completion order, which became nondeterministic once scanning went concurrent; list-mode's `select #:` index was fixed to match
+- `depman review` no longer writes `.cache_*.yaml` files into the repo it's reviewing (it now reuses `check`/`list`'s scan machinery internally but opts out of the cache-write side effect, which was dirtying the very repo being reviewed with new untracked files)
 
 ## Development
 

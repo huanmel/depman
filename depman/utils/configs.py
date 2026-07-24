@@ -1,5 +1,6 @@
 from typing import Optional
 from datetime import datetime  # Add if not present (for res['datetime'])
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import time
 from functools import wraps
@@ -121,7 +122,7 @@ def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, An
                 "deps": deps
             }
         except Exception as e:
-            click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"))
+            click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"), err=True)
     
     res = {
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -130,11 +131,152 @@ def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, An
     repos_in["repos"] = repos
     return res, repos_in
 
+def _scan_one_repo(repo_path: Path, root: Path) -> Tuple[str, Dict[str, Any]]:
+    """
+    Scan a single discovered .git directory: fetch upstream and compute its status entry.
+    Runs in a worker thread (one `git.Repo` per thread, no shared mutable state) so
+    find_all_git_repos can fetch many repos concurrently instead of one at a time.
+    """
+    git_root = repo_path.parent
+    repo = Repo(git_root)
+
+    revision = repo.head.commit.hexsha
+    short_revision = revision[:7]
+    remote_url = repo.remotes.origin.url if hasattr(repo.remotes, 'origin') else None
+    tags = [t.name for t in repo.tags]
+
+    # Handle current_branch and current_tag safely
+    if repo.head.is_detached:
+        current_branch = f"detached@{short_revision}"
+        # Tag: Match on HEAD commit
+        matching_tags = [tag.name for tag in repo.tags if tag.commit.hexsha == revision]
+        current_tag = matching_tags[0] if matching_tags else None
+    else:
+        current_branch = repo.active_branch.name
+        current_tag = (
+            repo.head.ref.name.replace("refs/tags/", "")
+            if repo.head.ref and repo.head.ref.name.startswith("refs/tags/")
+            else None
+        )
+
+    # Fetch upstream (origin)
+    if hasattr(repo.remotes, 'origin'):
+        repo.remotes.origin.fetch()
+
+    # Determine remote baseline (origin/main or origin/HEAD)
+    remote_ref_name = None
+    remote_ref = None
+    for ref_name in ['origin/main', 'origin/HEAD']:
+        try:
+            remote_ref = repo.refs[ref_name]
+            remote_ref_name = ref_name
+            break
+        except IndexError:
+            continue
+    if not remote_ref:
+        current_branch = None  # Skip checks
+
+    # Check updates (behind: HEAD..remote_ref) and unpushed (ahead: remote_ref..HEAD)
+    has_update = False
+    update_details = None
+    has_unpushed = False
+    unpushed_count = 0
+    if remote_ref:
+        # Behind (updates available)
+        behind_commits = list(repo.iter_commits(f'HEAD..{remote_ref.name}'))
+        if behind_commits:
+            has_update = True
+            latest_commit = behind_commits[0]  # Most recent remote
+            update_details = {
+                "branch": remote_ref_name,
+                "latest_hash": latest_commit.hexsha,
+                "datetime": latest_commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                "message": latest_commit.message.split('\n')[0]
+            }
+
+        # Ahead (unpushed/diverged)
+        ahead_commits = list(repo.iter_commits(f'{remote_ref.name}..HEAD'))
+        unpushed_count = len(ahead_commits)
+        has_unpushed = unpushed_count > 0
+
+    # get latest commit info
+    head_commit_info = None
+    try:
+        commit = repo.head.commit
+        head_commit_info = {
+            "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+            "message": commit.message.split('\n')[0],
+            "author": commit.author.name
+        }
+    except (IndexError, AttributeError):
+        pass
+
+    # Main check (always, if exists; for non-detached, as before)
+    has_update_main = False
+    update_details_main = None
+    if not repo.head.is_detached:
+        if current_branch and current_branch != "main":
+            for main_branch in ["main", "master"]:
+                try:
+                    main_ref_name = f"origin/{main_branch}"
+                    origin_main_ref = repo.refs[main_ref_name]
+                    main_local_ref = repo.refs[main_branch]
+                    if main_local_ref.commit.hexsha != origin_main_ref.commit.hexsha:
+                        has_update_main = True
+                        commit = origin_main_ref.commit
+                        update_details_main = {
+                            "branch": main_branch,
+                            "latest_hash": origin_main_ref.commit.hexsha,
+                            "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                            "message": commit.message.split('\n')[0]
+                        }
+                        break
+                except (IndexError, AttributeError):
+                    continue
+    else:
+        # For detached, has_update_main mirrors has_update (main divergence)
+        has_update_main = has_update
+        update_details_main = update_details
+
+    # Uncommitted changes (works in detached)
+    has_uncommitted = repo.is_dirty()
+    uncommitted_files = []
+    if has_uncommitted:
+        uncommitted_files.extend(repo.untracked_files)
+        uncommitted_files.extend([diff.a_path for diff in repo.index.diff(None)])
+        uncommitted_files.extend([diff.a_path for diff in repo.index.diff("HEAD")])
+
+    project_root_short = git_root.relative_to(root)
+    data = {
+        "name": project_root_short.name if project_root_short.name else ".",
+        "project_root": str(project_root_short),
+        "rev": revision,
+        "rev_short": short_revision,
+        "remote_url": remote_url,
+        "tags": tags,
+        "current_tag": current_tag,
+        "current_branch": current_branch,
+        "commit_info": head_commit_info,
+        "has_update": has_update,
+        "update_details": update_details,
+        "has_update_main": has_update_main,
+        "update_details_main": update_details_main,
+        "has_uncommitted": has_uncommitted,
+        "uncommitted_files": uncommitted_files,
+        "has_unpushed": has_unpushed,
+        "unpushed_count": unpushed_count,
+        "used_in_configs": {},
+    }
+    return str(project_root_short), data
+
+
 @timeit
-def find_all_git_repos(root: Path) -> Dict[str, Any]:
+def find_all_git_repos(root: Path, jobs: int = 8) -> Dict[str, Any]:
     """
     Find all Git repos under root, fetch upstream, and detect updates/uncommitted/unpushed.
     Handles detached HEAD: Uses origin/main (or origin/HEAD) for comparisons; flags behind/ahead.
+    Repos are scanned concurrently (up to `jobs` at a time) since each scan is dominated by
+    a network fetch; only the main thread writes into the returned dict.
     Returns: {
         'repos': {
             repo_path: str (relative): {
@@ -159,150 +301,61 @@ def find_all_git_repos(root: Path) -> Dict[str, Any]:
         'datetime': str (scan time)
     }
     """
-    
     repos = {}
-    paths=[p for p in root.rglob(".git") if p.is_dir()]
-    for repo_path in tqdm(paths, desc="Scanning Git repos",colour="green"):
-        if repo_path.is_dir():
-            git_root = repo_path.parent
+    paths = [p for p in root.rglob(".git") if p.is_dir()]
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
+        futures = {executor.submit(_scan_one_repo, p, root): p for p in paths}
+        for future in tqdm(as_completed(futures), total=len(paths), desc="Scanning Git repos", colour="green"):
+            repo_path = futures[future]
             try:
-                repo = Repo(git_root)
-                
-                revision = repo.head.commit.hexsha
-                short_revision = revision[:7]
-                remote_url = repo.remotes.origin.url if hasattr(repo.remotes, 'origin') else None
-                tags = [t.name for t in repo.tags]
-                
-                # Handle current_branch and current_tag safely
-                if repo.head.is_detached:
-                    current_branch = f"detached@{short_revision}"
-                    # Tag: Match on HEAD commit
-                    matching_tags = [tag.name for tag in repo.tags if tag.commit.hexsha == revision]
-                    current_tag = matching_tags[0] if matching_tags else None
-                else:
-                    current_branch = repo.active_branch.name
-                    current_tag = (
-                        repo.head.ref.name.replace("refs/tags/", "")
-                        if repo.head.ref and repo.head.ref.name.startswith("refs/tags/")
-                        else None
-                    )
-
-                # Fetch upstream (origin)
-                if hasattr(repo.remotes, 'origin'):
-                    repo.remotes.origin.fetch()
-
-                # Determine remote baseline (origin/main or origin/HEAD)
-                remote_ref_name = None
-                remote_ref = None
-                for ref_name in ['origin/main', 'origin/HEAD']:
-                    try:
-                        remote_ref = repo.refs[ref_name]
-                        remote_ref_name = ref_name
-                        break
-                    except IndexError:
-                        continue
-                if not remote_ref:
-                    current_branch = None  # Skip checks
-
-                # Check updates (behind: HEAD..remote_ref) and unpushed (ahead: remote_ref..HEAD)
-                has_update = False
-                update_details = None
-                has_unpushed = False
-                unpushed_count = 0
-                if remote_ref:
-                    # Behind (updates available)
-                    behind_commits = list(repo.iter_commits(f'HEAD..{remote_ref.name}'))
-                    if behind_commits:
-                        has_update = True
-                        latest_commit = behind_commits[0]  # Most recent remote
-                        update_details = {
-                            "branch": remote_ref_name,
-                            "latest_hash": latest_commit.hexsha,
-                            "datetime": latest_commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                            "message": latest_commit.message.split('\n')[0]
-                        }
-                    
-                    # Ahead (unpushed/diverged)
-                    ahead_commits = list(repo.iter_commits(f'{remote_ref.name}..HEAD'))
-                    unpushed_count = len(ahead_commits)
-                    has_unpushed = unpushed_count > 0
-                
-                
-                # get latest commit info
-                head_commit_info = None
-                try:
-                    commit = repo.head.commit
-                    head_commit_info = {
-                        "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                        "message": commit.message.split('\n')[0],
-                        "author": commit.author.name
-                    }
-                except (IndexError, AttributeError):
-                    pass
-                
-                # Main check (always, if exists; for non-detached, as before)
-                has_update_main = False
-                update_details_main = None
-                if not repo.head.is_detached:
-                    if current_branch and current_branch != "main":
-                        for main_branch in ["main", "master"]:
-                            try:
-                                main_ref_name = f"origin/{main_branch}"
-                                origin_main_ref = repo.refs[main_ref_name]
-                                main_local_ref = repo.refs[main_branch]
-                                if main_local_ref.commit.hexsha != origin_main_ref.commit.hexsha:
-                                    has_update_main = True
-                                    commit = origin_main_ref.commit
-                                    update_details_main = {
-                                        "branch": main_branch,
-                                        "latest_hash": origin_main_ref.commit.hexsha,
-                                        "datetime": commit.authored_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                                        "message": commit.message.split('\n')[0]
-                                    }
-                                    break
-                            except (IndexError, AttributeError):
-                                continue
-                else:
-                    # For detached, has_update_main mirrors has_update (main divergence)
-                    has_update_main = has_update
-                    update_details_main = update_details
-
-                # Uncommitted changes (works in detached)
-                has_uncommitted = repo.is_dirty()
-                uncommitted_files = []
-                if has_uncommitted:
-                    uncommitted_files.extend(repo.untracked_files)
-                    uncommitted_files.extend([diff.a_path for diff in repo.index.diff(None)])
-                    uncommitted_files.extend([diff.a_path for diff in repo.index.diff("HEAD")])
-
-                project_root_short = git_root.relative_to(root)
-                repos[str(project_root_short)] = {
-                    "name": project_root_short.name if project_root_short.name else ".",
-                    "project_root": str(project_root_short),
-                    "rev": revision,
-                    "rev_short": short_revision,
-                    "remote_url": remote_url,
-                    "tags": tags,
-                    "current_tag": current_tag,
-                    "current_branch": current_branch,
-                    "commit_info": head_commit_info,
-                    "has_update": has_update,
-                    "update_details": update_details,
-                    "has_update_main": has_update_main,
-                    "update_details_main": update_details_main,
-                    "has_uncommitted": has_uncommitted,
-                    "uncommitted_files": uncommitted_files,
-                    "has_unpushed": has_unpushed,
-                    "unpushed_count": unpushed_count,
-                    "used_in_configs": {},
-                }
+                key, data = future.result()
             except Exception as e:
-                click.echo(click.style(f"  {repo_path}: Error ({e})", fg="red"))
+                click.echo(click.style(f"  {repo_path}: Error ({e})", fg="red"), err=True)
+                continue
+            repos[key] = data
     res = {
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "repos": repos
     }
     return res
+
+
+def gitman_declared_order(configs: Dict[str, Any]) -> List[str]:
+    """
+    Depth-first repo order following gitman.yml declaration: root ('.') first, then
+    each dep in the order it's declared in its owning gitman.yml -- recursing
+    immediately into any dep that itself owns a nested gitman.yml, so a subproject's
+    own deps appear right after it rather than at the end.
+
+    Relies on `deps` dicts (built by find_all_configs) preserving insertion order,
+    which matches the order entries appear in the source gitman.yml.
+
+    Repos not declared in any loaded config are not included here -- callers that
+    need a complete, deterministic order should append those separately (e.g.
+    sorted alphabetically), which is also how "forgot to add this to a config"
+    cases surface.
+    """
+    all_configs = configs.get("configs", {})
+    order: List[str] = []
+    seen = set()
+
+    def _walk(config_path: str) -> None:
+        if config_path in seen:
+            return
+        seen.add(config_path)
+        order.append(config_path)
+        for dep_path in all_configs.get(config_path, {}).get("deps", {}).keys():
+            _walk(dep_path)
+
+    _walk(".")
+    return order
+
+
+def _full_repo_order(configs: Dict[str, Any], repo_keys) -> List[str]:
+    """gitman_declared_order(), filtered to known repos, plus any undeclared repos appended (sorted)."""
+    declared = [k for k in gitman_declared_order(configs) if k in repo_keys]
+    remaining = sorted(k for k in repo_keys if k not in declared)
+    return declared + remaining
 
 
 def print_check_table(
@@ -320,7 +373,9 @@ def print_check_table(
     click.echo(click.style(
         f"\n=== Git Repos Status (scanned at {git_repos['datetime']}) ===", bold=True))
 
-    for idx, (key, val) in enumerate(git_repos["repos"].items()):
+    ordered_keys = _full_repo_order(configs, git_repos["repos"].keys())
+    for idx, key in enumerate(ordered_keys):
+        val = git_repos["repos"][key]
         has_updates_repo = val["has_uncommitted"] or val["has_unpushed"] or val["has_update"] or val["has_update_main"]
 
         if val["has_uncommitted"]:
@@ -372,8 +427,8 @@ def print_check_table(
         click.echo()
         if c.isdigit():
             idx_sel = int(c)
-            if idx_sel >=0 and idx_sel < len(git_repos["repos"]):
-                repo_key = list(git_repos["repos"].keys())[idx_sel]
+            if idx_sel >=0 and idx_sel < len(ordered_keys):
+                repo_key = ordered_keys[idx_sel]
                 click.echo(click.style(
                     f"Details for repo {c} {repo_key}:", fg="green"))
                 repo_info = git_repos["repos"][repo_key]
@@ -465,7 +520,9 @@ def print_list_configs_repos(
     print(f"Total repos: {len(repos.get('repos', {}))}")
     print(f"snapshot datetime: {repos.get('datetime', {})}")
     is_total_ok = True
-    for repo_path, repo_info in repos.get("repos", {}).items():
+    ordered_keys = _full_repo_order(configs, repos.get("repos", {}).keys())
+    for repo_path in ordered_keys:
+        repo_info = repos["repos"][repo_path]
         has_updates_repo = repo_info["has_uncommitted"] or repo_info["has_unpushed"] or repo_info["has_update"] or repo_info["has_update_main"]
         conf=repo_info.get('used_in_configs')
         is_rev_matched = False
@@ -571,11 +628,12 @@ def analyze_configs_repos(
                 repo_info = repos_map[dep_path_str]
                 rev_match = dep_info['rev_locked'] == repo_info['rev']
 
-                # Check if rev_locked behind origin/main (precise Git check)
+                # Check if rev_locked behind origin/main (precise Git check).
+                # No fetch here: find_all_git_repos() already fetched every one of
+                # these repos moments ago in this same run, so remote-tracking
+                # refs are already fresh -- refetching just doubles network cost.
                 try:
                     repo = Repo(root / dep_path_str)
-                    if hasattr(repo.remotes, 'origin'):
-                        repo.remotes.origin.fetch()
                     # Find origin/main or origin/HEAD
                     remote_ref = None
                     for ref_name in ['origin/main', 'origin/HEAD']:
@@ -667,28 +725,30 @@ def find_nested_configs(base_path: Path, depth: int = float("inf")) -> List[Path
 
 
 
-def get_configs_and_repos(root: Path, use_cache: bool = False):
+def get_configs_and_repos(root: Path, use_cache: bool = False, jobs: int = 8, write_cache: bool = True):
     """Get configs and git repos, using cache if specified."""
     if use_cache:
         loaded_configs, git_repos = get_cached_configs(
             root, CACHE_GIT_REPOS, CACHE_CONFIGS)
 
     else:
-        git_repos = find_all_git_repos(root)
+        git_repos = find_all_git_repos(root, jobs=jobs)
         num_repos = len(git_repos["repos"])
         print(f"✅ find_all_git_repos: Found {num_repos} repos", file=sys.stderr)
 
         loaded_configs, git_repos = find_all_configs(root, git_repos)
         loaded_configs, git_repos = analyze_configs_repos(loaded_configs, git_repos, root)
-        cache_conf_file = root / CACHE_CONFIGS
-        with open(cache_conf_file, "w") as f:
-            yaml.safe_dump(loaded_configs, f,
-                           default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped loaded_configs to {cache_conf_file}", file=sys.stderr)
 
-        cache_repos_file = root / CACHE_GIT_REPOS
-        with open(cache_repos_file, "w") as f:
-            yaml.safe_dump(
-                git_repos, f, default_flow_style=False, sort_keys=False)
-        print(f"✅ Dumped git_repos to {cache_repos_file}", file=sys.stderr)
+        if write_cache:
+            cache_conf_file = root / CACHE_CONFIGS
+            with open(cache_conf_file, "w") as f:
+                yaml.safe_dump(loaded_configs, f,
+                               default_flow_style=False, sort_keys=False)
+            print(f"✅ Dumped loaded_configs to {cache_conf_file}", file=sys.stderr)
+
+            cache_repos_file = root / CACHE_GIT_REPOS
+            with open(cache_repos_file, "w") as f:
+                yaml.safe_dump(
+                    git_repos, f, default_flow_style=False, sort_keys=False)
+            print(f"✅ Dumped git_repos to {cache_repos_file}", file=sys.stderr)
     return loaded_configs, git_repos

@@ -18,15 +18,16 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import click
 from git import GitCommandError, Repo
 
-from depman import CACHE_CONFIGS, CACHE_GIT_REPOS
-from depman.utils.configs import find_all_git_repos, get_cached_configs
+from depman.utils.configs import get_configs_and_repos, gitman_declared_order
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
-ORDER_CHOICES = ["root-last", "root-first"]
+ORDER_CHOICES = ["root-last", "root-first", "gitman"]
 ORDER_HELP = (
     "processing order for dirty repos: 'root-last' (default) handles nested deps "
-    "first and the root project last; 'root-first' goes alphabetically (root first)."
+    "alphabetically, root last; 'root-first' is the same but root first; 'gitman' "
+    "follows each gitman.yml's declared dep order (depth-first through nested "
+    "configs), root last -- reorder gitman.yml's sources to control this order."
 )
 
 
@@ -224,15 +225,31 @@ def _review_repo(repo: Repo, repo_path: str) -> Optional[str]:
             return None
 
 
-def _ordered_repo_paths(paths: Iterable[str], order: str) -> List[str]:
-    paths = sorted(paths)
-    if order == "root-last" and "." in paths:
-        paths.remove(".")
-        paths.append(".")
-    return paths
+def _ordered_repo_paths(
+    paths: Iterable[str], order: str, configs: Optional[Dict[str, Any]] = None
+) -> List[str]:
+    paths = set(paths)
+    if order == "gitman" and configs:
+        declared = [p for p in gitman_declared_order(configs) if p in paths and p != "."]
+        remaining = sorted(p for p in paths if p not in declared and p != ".")
+        ordered = declared + remaining
+        if "." in paths:
+            ordered.append(".")  # root last, same rationale as root-last
+        return ordered
+
+    ordered = sorted(paths)
+    if order == "root-last" and "." in ordered:
+        ordered.remove(".")
+        ordered.append(".")
+    return ordered
 
 
-def run_review(root: Path, git_repos: Dict[str, Any], order: str = "root-last") -> None:
+def run_review(
+    root: Path,
+    git_repos: Dict[str, Any],
+    order: str = "root-last",
+    configs: Optional[Dict[str, Any]] = None,
+) -> None:
     """Shared review workflow, usable from `depman review` and `depman check -r`."""
     needs_review = {
         path: info
@@ -248,7 +265,7 @@ def run_review(root: Path, git_repos: Dict[str, Any], order: str = "root-last") 
         f"\nFound {len(needs_review)} repo(s) with uncommitted changes or unpushed commits.",
         bold=True))
 
-    for repo_path in _ordered_repo_paths(needs_review.keys(), order):
+    for repo_path in _ordered_repo_paths(needs_review.keys(), order, configs):
         repo = Repo(root / repo_path)
         if _review_repo(repo, repo_path) == "quit":
             click.echo("Stopping review.")
@@ -267,12 +284,18 @@ def run_review(root: Path, git_repos: Dict[str, Any], order: str = "root-last") 
     "(faster, no network fetch; which repos are dirty may be stale if scanned a while ago).",
 )
 @click.option("--order", type=click.Choice(ORDER_CHOICES), default="root-last", help=ORDER_HELP)
+@click.option(
+    "--jobs",
+    "-j",
+    type=int,
+    default=8,
+    help="number of repos to fetch/scan concurrently during a live scan (default: 8).",
+)
 @click.pass_context
-def review_cmd(ctx: click.Context, use_cache: bool, order: str):
+def review_cmd(ctx: click.Context, use_cache: bool, order: str, jobs: int):
     """Semi-automatic review: commit or revert changes in each dirty repo, one at a time."""
     root: Path = ctx.obj["root"]
-    if use_cache:
-        _, git_repos = get_cached_configs(root, CACHE_GIT_REPOS, CACHE_CONFIGS)
-    else:
-        git_repos = find_all_git_repos(root)
-    run_review(root, git_repos, order=order)
+    # write_cache=False: a standalone `review` shouldn't leave new untracked cache
+    # files in the very repo it's about to review.
+    configs, git_repos = get_configs_and_repos(root, use_cache=use_cache, jobs=jobs, write_cache=False)
+    run_review(root, git_repos, order=order, configs=configs)

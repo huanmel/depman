@@ -9,7 +9,12 @@ from click.testing import CliRunner
 from git import Repo
 
 from depman.cli import cli
-from depman.utils.configs import find_all_configs, find_all_git_repos
+from depman.utils.configs import (
+    analyze_configs_repos,
+    find_all_configs,
+    find_all_git_repos,
+    gitman_declared_order,
+)
 
 
 def _init_repo(path: Path) -> Repo:
@@ -45,6 +50,52 @@ def project(tmp_path: Path) -> Path:
 
 def _dep_key() -> str:
     return str(Path("deps") / "widget")
+
+
+@pytest.fixture
+def nested_order_project(tmp_path: Path) -> Path:
+    """
+    Root gitman.yml declares deps out of alphabetical order: [zeta, alpha].
+    'alpha' itself owns a nested gitman.yml declaring its own sub-dep 'alpha_sub'.
+    Expected gitman-declared order: [".", "zeta", "alpha", "alpha_sub"].
+    """
+    root = tmp_path / "project"
+    zeta = root / "deps" / "zeta"
+    alpha = root / "deps" / "alpha"
+    alpha_sub = alpha / "deps" / "alpha_sub"
+
+    _init_repo(root)
+    _init_repo(zeta)
+    _init_repo(alpha)
+    _init_repo(alpha_sub)
+
+    (root / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [
+            {"name": "zeta", "repo": str(zeta), "rev": "main"},
+            {"name": "alpha", "repo": str(alpha), "rev": "main"},
+        ],
+    }))
+    (alpha / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [
+            {"name": "alpha_sub", "repo": str(alpha_sub), "rev": "main"},
+        ],
+    }))
+
+    return root
+
+
+def _zeta_key() -> str:
+    return str(Path("deps") / "zeta")
+
+
+def _alpha_key() -> str:
+    return str(Path("deps") / "alpha")
+
+
+def _alpha_sub_key() -> str:
+    return str(Path("deps") / "alpha" / "deps" / "alpha_sub")
 
 
 def test_find_all_git_repos_finds_root_and_nested(project: Path):
@@ -87,6 +138,31 @@ def test_find_all_configs_defaults_location_when_missing(project: Path):
     assert configs["configs"]["nested2"]["location"] == "gitman_sources"
 
 
+def test_find_all_git_repos_isolates_broken_repo_errors(project: Path):
+    """A corrupt .git dir must not abort the scan of the other, valid repos."""
+    broken_git = project / "broken" / ".git"
+    broken_git.mkdir(parents=True)  # empty dir named ".git" -- not a real repo
+
+    result = find_all_git_repos(project)
+
+    assert "." in result["repos"]
+    assert _dep_key() in result["repos"]
+    assert str(Path("broken")) not in result["repos"]
+
+
+def test_analyze_configs_repos_sets_cross_reference_fields(project: Path):
+    repos = find_all_git_repos(project)
+    configs, repos = find_all_configs(project, repos)
+    configs, repos = analyze_configs_repos(configs, repos, project)
+
+    dep_key = _dep_key()
+    dep_info = configs["configs"]["."]["deps"][dep_key]
+    assert dep_info["in_repos"] is True
+    assert "rev_match" in dep_info
+    assert "behind_main" in dep_info
+    assert repos["repos"][dep_key]["in_config"] is True
+
+
 def test_cli_list_runs_against_scanned_project(project: Path):
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(project), "list"])
@@ -114,6 +190,21 @@ def test_cli_check_json_prints_clean_json_on_stdout(project: Path):
     assert "Dumped" not in result.stdout
     # ...but it's still there, just on stderr
     assert "find_all_git_repos" in result.stderr
+
+
+def test_cli_check_json_stays_clean_when_a_repo_errors(project: Path):
+    """A broken repo's error message must land on stderr, not corrupt the JSON on stdout."""
+    broken_git = project / "broken" / ".git"
+    broken_git.mkdir(parents=True)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "check", "--json"])
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(result.stdout)  # must not raise
+    assert "." in payload["repos"]["repos"]
+    assert not any("broken" in k for k in payload["repos"]["repos"])
+    assert "Error" in result.stderr
 
 
 def test_cli_list_json_prints_clean_json_on_stdout(project: Path):
@@ -362,3 +453,65 @@ def test_check_review_flag_shows_table_then_enters_review(project: Path):
     assert result.exit_code == 0, result.output
     assert "Git Repos Status" in result.output
     assert "Changed files:" in result.output
+
+
+def test_gitman_declared_order_follows_yaml_and_nests_subprojects(nested_order_project: Path):
+    """Root first, then deps in gitman.yml declaration order, with a subproject's
+    own nested deps placed right after it rather than at the end."""
+    repos = find_all_git_repos(nested_order_project)
+    configs, repos = find_all_configs(nested_order_project, repos)
+
+    order = gitman_declared_order(configs)
+
+    assert order == [".", _zeta_key(), _alpha_key(), _alpha_sub_key()]
+
+
+def test_check_table_order_follows_gitman_yaml_and_nests_subprojects(nested_order_project: Path):
+    root = nested_order_project
+    (root / "README.md").write_text("root changed\n")
+    (root / "deps" / "zeta" / "README.md").write_text("zeta changed\n")
+    (root / "deps" / "alpha" / "README.md").write_text("alpha changed\n")
+    (root / "deps" / "alpha" / "deps" / "alpha_sub" / "README.md").write_text("alpha_sub changed\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "check"])
+    assert result.exit_code == 0, result.output
+
+    idx_root = result.output.index("Repo . has uncommitted")
+    idx_zeta = result.output.index(f"Repo {_zeta_key()} has uncommitted")
+    idx_alpha = result.output.index(f"Repo {_alpha_key()} has uncommitted")
+    idx_alpha_sub = result.output.index(f"Repo {_alpha_sub_key()} has uncommitted")
+
+    assert idx_root < idx_zeta < idx_alpha < idx_alpha_sub
+
+
+def test_review_gitman_order_follows_yaml_and_nests_subprojects_root_last(nested_order_project: Path):
+    root = nested_order_project
+    (root / "README.md").write_text("root changed\n")
+    (root / "deps" / "zeta" / "README.md").write_text("zeta changed\n")
+    (root / "deps" / "alpha" / "README.md").write_text("alpha changed\n")
+    (root / "deps" / "alpha" / "deps" / "alpha_sub" / "README.md").write_text("alpha_sub changed\n")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "review", "--order", "gitman"], input="s\ns\ns\ns\n"
+    )
+    assert result.exit_code == 0, result.output
+
+    idx_zeta = result.output.index(f"=== {_zeta_key()} ===")
+    idx_alpha = result.output.index(f"=== {_alpha_key()} ===")
+    idx_alpha_sub = result.output.index(f"=== {_alpha_sub_key()} ===")
+    idx_root = result.output.index("=== . ===")
+
+    assert idx_zeta < idx_alpha < idx_alpha_sub < idx_root
+
+
+def test_review_no_longer_writes_cache_files(project: Path):
+    """`review` (unlike `check`/`list`) must not leave new untracked cache files
+    in the repo it's reviewing."""
+    (project / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="s\n")
+    assert result.exit_code == 0, result.output
+    assert not (project / ".cache_configs.yaml").exists()
+    assert not (project / ".cache_git_repos.yaml").exists()
