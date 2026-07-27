@@ -8,6 +8,7 @@ import click
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from depman import CONFIG_NAME, CACHE_GIT_REPOS, CACHE_CONFIGS
+from depman.backends import BACKENDS
 import yaml  # For manual YAML loads
 from git import Repo, GitCommandError
 from gitman.models import Config
@@ -63,73 +64,66 @@ def find_git_root(start: str = ".") -> Optional[str]:
 @timeit
 def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    Load all .gitman.yml configs under root, flatten deps into structure.
-    Returns: {'configs': {config_path: str: {'project_root': Path, 'location': str, 'deps': List[Dict{'name': str, 'repo': str, 'rev': str, 'path': Path}]}}}
+    Load all configs under root across every registered backend (currently just
+    gitman.yml; see depman/backends/), flatten deps into a unified structure.
+    Returns: {'configs': {config_path: str: {'project_root': Path, 'location': str, 'backend': str, 'deps': List[Dict{'name': str, 'repo': str, 'rev': str, 'path': Path}]}}}
     """
     configs = {}
     repos = repos_in.get("repos", {})
-    for config_path in root.glob(f"**/{CONFIG_NAME}"):
-        project_root = config_path.parent
-        try:
-            with open(config_path) as f:
-                content = yaml.safe_load(f)
-            if not isinstance(content, dict):
-                # empty file (safe_load -> None) or malformed content (not a mapping)
-                content = {}
+    for backend in BACKENDS:
+        for config_path in backend.discover(root):
+            try:
+                entry = backend.parse_one(config_path, root, repos)
+                entry["backend"] = backend.name
+                configs[entry["project_root"]] = entry
+            except Exception as e:
+                click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"), err=True)
 
-            location = content.get("location", "gitman_sources")  # gitman's own default
-            deps = {}
-            deps_locked={}
-            # Flatten requirements
-                
-            for req in content.get("sources_locked", []):
-                name = req.get("name", Path(req["repo"]).name)
-                dep_path = project_root / location / name
-                
-                deps_locked[str(dep_path.relative_to(root))] = {
-                    "name": name,
-                    "repo": req["repo"],
-                    "rev": req["rev"]
-                }
-            for req in content.get("sources", []):
-                name = req.get("name", Path(req["repo"]).name)
-                dep_path = project_root / location / name
-                dep_path_rel=str(dep_path.relative_to(root))
-                rev_installed = repos.get(dep_path_rel, {}).get("rev") if dep_path_rel in repos else None
-                rev_locked=deps_locked[dep_path_rel]["rev"] if dep_path_rel in deps_locked else None
-                rev = req["rev"]
-                if rev_installed:
-                    proj_root_relative=str(project_root.relative_to(root))
-                    repos[dep_path_rel]["used_in_configs"].update({proj_root_relative : rev_locked if rev_locked else rev_installed})
-                    
-                    
-                deps[dep_path_rel]={
-                    "name": name,
-                    "repo": req["repo"],
-                    "rev": rev,
-                    "rev_locked": rev_locked,
-                    "rev_installed": rev_installed,
-                    "path": dep_path_rel
-                }
-            project_root_short = str(project_root.relative_to(root))
-            rev_installed = repos.get(project_root_short, {}).get("rev")
-
-            configs[str(project_root_short)] = {
-                "project_root": project_root_short,
-                "config_file": str(config_path.name),
-                "location": location,
-                "rev_installed": rev_installed,                
-                "deps": deps
-            }
-        except Exception as e:
-            click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"), err=True)
-    
     res = {
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "configs": configs
     }
     repos_in["repos"] = repos
     return res, repos_in
+
+
+def local_repo_issues(repo: Repo) -> Dict[str, Any]:
+    """
+    Fast, local-only status check: no network fetch. Unpushed-commit detection
+    uses whatever remote-tracking ref state is already on disk, which may be
+    stale if nothing has fetched recently. Intended for latency-sensitive
+    callers (e.g. a pre-push hook) where find_all_git_repos's live fetch per
+    repo would be too slow.
+
+    Returns: {'has_uncommitted': bool, 'uncommitted_files': List[str],
+              'has_unpushed': bool, 'unpushed_count': int}
+    """
+    has_uncommitted = repo.is_dirty()
+    uncommitted_files: List[str] = []
+    if has_uncommitted:
+        uncommitted_files.extend(repo.untracked_files)
+        uncommitted_files.extend([diff.a_path for diff in repo.index.diff(None)])
+        uncommitted_files.extend([diff.a_path for diff in repo.index.diff("HEAD")])
+
+    has_unpushed = False
+    unpushed_count = 0
+    if not repo.head.is_detached and hasattr(repo.remotes, "origin"):
+        branch = repo.active_branch.name
+        remote_ref = f"origin/{branch}"
+        try:
+            repo.refs[remote_ref]
+            unpushed_count = len(list(repo.iter_commits(f"{remote_ref}..{branch}")))
+        except IndexError:
+            unpushed_count = len(list(repo.iter_commits(branch)))  # never pushed before
+        has_unpushed = unpushed_count > 0
+
+    return {
+        "has_uncommitted": has_uncommitted,
+        "uncommitted_files": uncommitted_files,
+        "has_unpushed": has_unpushed,
+        "unpushed_count": unpushed_count,
+    }
+
 
 def _scan_one_repo(repo_path: Path, root: Path) -> Tuple[str, Dict[str, Any]]:
     """

@@ -14,6 +14,7 @@ from typing import Optional
 from .commands.gm_commands import gm
 from .commands.checker import check_cmd, list_cmd
 from .commands.review import review_cmd
+from .commands.hooks import hooks
 from .utils.configs import find_git_root
 
 
@@ -38,6 +39,7 @@ cli.add_command(gm)
 cli.add_command(check_cmd)
 cli.add_command(list_cmd)
 cli.add_command(review_cmd)
+cli.add_command(hooks)
 
 
 if __name__ == "__main__":

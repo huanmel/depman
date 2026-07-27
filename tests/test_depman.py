@@ -1,6 +1,8 @@
 """Tests for depman's git/config scanning and CLI commands."""
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -10,11 +12,13 @@ from git import Repo
 from git.exc import HookExecutionError
 
 from depman.cli import cli
+from depman.commands.hooks import HOOK_MARKER
 from depman.utils.configs import (
     analyze_configs_repos,
     find_all_configs,
     find_all_git_repos,
     gitman_declared_order,
+    local_repo_issues,
 )
 
 
@@ -51,6 +55,50 @@ def project(tmp_path: Path) -> Path:
 
 def _dep_key() -> str:
     return str(Path("deps") / "widget")
+
+
+def _sub_key() -> str:
+    return str(Path("deps") / "sub")
+
+
+@pytest.fixture
+def subproject_project(tmp_path: Path) -> Path:
+    """
+    Root -> 'sub' (a subproject that owns its own nested gitman.yml) -> 'leaf'.
+    'sub's gitman.yml is committed with a deliberately stale sources_locked entry
+    for 'leaf' (a fake SHA, not leaf's actual installed rev), so 'sub' is clean
+    and fully local (no remote) but has a genuinely stale lock.
+    """
+    root = tmp_path / "project"
+    sub = root / "deps" / "sub"
+    leaf = sub / "deps" / "leaf"
+
+    _init_repo(root)
+    _init_repo(sub)
+    leaf_repo = _init_repo(leaf)
+    # gitman.lock() shells out to `git config --get remote.origin.url` on each
+    # dep, so it needs a real 'origin' remote configured, not just a gitman.yml
+    # 'repo:' path -- self-referencing is fine, gitman only reads the URL string.
+    leaf_repo.create_remote("origin", str(leaf))
+
+    (root / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "sub", "repo": str(sub), "rev": "main"}],
+    }))
+
+    sub_repo = Repo(sub)
+    (sub / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "leaf", "repo": str(leaf), "rev": "main"}],
+        "sources_locked": [{"name": "leaf", "repo": str(leaf), "rev": "0" * 40}],
+    }))
+    # git add -A (not index.add) so the nested 'leaf' repo is committed as a
+    # gitlink too -- otherwise "deps/" would always show as untracked and 'sub'
+    # could never actually be clean, which is the scenario this fixture needs.
+    sub_repo.git.add(A=True)
+    sub_repo.git.commit("-m", "add gitman.yml with a stale lock for leaf")
+
+    return root
 
 
 @pytest.fixture
@@ -113,6 +161,14 @@ def test_find_all_configs_flattens_deps(project: Path):
     assert any(dep_info["name"] == "widget" for dep_info in deps.values())
 
 
+def test_find_all_configs_stamps_backend_marker(project: Path):
+    """Every config entry must record which backend (gitman.yml today) produced
+    it, so downstream code (e.g. review's relock action) can dispatch correctly."""
+    repos = find_all_git_repos(project)
+    configs, repos = find_all_configs(project, repos)
+    assert configs["configs"]["."]["backend"] == "gitman"
+
+
 def test_find_all_configs_handles_empty_gitman_yml(project: Path, capsys):
     """An empty gitman.yml (yaml.safe_load -> None) must not crash the scan."""
     nested = project / "nested"
@@ -162,6 +218,52 @@ def test_analyze_configs_repos_sets_cross_reference_fields(project: Path):
     assert "rev_match" in dep_info
     assert "behind_main" in dep_info
     assert repos["repos"][dep_key]["in_config"] is True
+
+
+def test_review_stale_lock_only_repo_enters_review_and_offers_relock(subproject_project: Path):
+    """A subproject that's clean and fully local but has a stale lock must still
+    show up in review (the needs_review filter change), offer 'u', relock via
+    gitman.lock(), and stop re-reporting stale once fixed (the in-memory refresh)."""
+    root = subproject_project
+    runner = CliRunner()
+    # blank -> default 'u' (stale, no changed files) -> confirm relock "y" -> loop
+    # back (gitman.yml now modified, stale cleared) -> "c" commit -> confirm blank
+    # (yes) -> message blank (default) -> push attempt fails (no remote), no more input
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="\ny\nc\n\n\n")
+    assert result.exit_code == 0, result.output
+    assert f"stale for 1 dep(s): leaf" in result.output
+    assert result.output.count("stale for") == 1  # not reported again after relocking
+    assert "Relocked gitman.yml" in result.output
+    assert "Committed" in result.output
+
+    sub_repo = Repo(root / "deps" / "sub")
+    assert not sub_repo.is_dirty(untracked_files=True)
+    locked = yaml.safe_load((root / "deps" / "sub" / "gitman.yml").read_text())
+    leaf_repo = Repo(root / "deps" / "sub" / "deps" / "leaf")
+    assert locked["sources_locked"][0]["rev"] == leaf_repo.head.commit.hexsha
+
+
+def test_review_declining_relock_leaves_lock_untouched(subproject_project: Path):
+    root = subproject_project
+    runner = CliRunner()
+    # 'u' always loops back to re-prompt for the same repo (stale until fixed),
+    # whether confirmed or declined -- "s" ends the test after declining.
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="u\nn\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "Cancelled." in result.output
+
+    locked = yaml.safe_load((root / "deps" / "sub" / "gitman.yml").read_text())
+    assert locked["sources_locked"][0]["rev"] == "0" * 40
+
+
+def test_review_no_stale_lock_warning_when_never_locked(project: Path):
+    """A dep with no sources_locked at all is unlocked, not stale -- must not
+    trigger the stale-lock warning/'u' choice (the project fixture never locks)."""
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "review"])
+    assert result.exit_code == 0, result.output
+    assert "gitman.yml lock is stale" not in result.output
+    assert "update-lock" not in result.output
 
 
 def test_cli_list_runs_against_scanned_project(project: Path):
@@ -632,3 +734,100 @@ def test_review_no_longer_writes_cache_files(project: Path):
     assert result.exit_code == 0, result.output
     assert not (project / ".cache_configs.yaml").exists()
     assert not (project / ".cache_git_repos.yaml").exists()
+
+
+def test_local_repo_issues_clean_repo(project: Path):
+    info = local_repo_issues(Repo(project))
+    assert info["has_uncommitted"] is False
+    assert info["has_unpushed"] is False
+    assert info["unpushed_count"] == 0
+
+
+def test_local_repo_issues_detects_uncommitted(project: Path):
+    (project / "README.md").write_text("changed\n")
+    info = local_repo_issues(Repo(project))
+    assert info["has_uncommitted"] is True
+    assert "README.md" in info["uncommitted_files"]
+
+
+def test_local_repo_issues_never_fetches(tmp_path: Path):
+    """Must complete fast even with an unreachable remote -- it must never fetch."""
+    root = tmp_path / "proj"
+    repo = _init_repo(root)
+    repo.create_remote("origin", "https://192.0.2.1/unreachable.git")  # TEST-NET-1
+    start = time.monotonic()
+    info = local_repo_issues(repo)
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, "local_repo_issues took too long -- did it try to fetch?"
+    assert info["has_uncommitted"] is False
+
+
+def test_hooks_install_writes_executable_script(project: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "install"])
+    assert result.exit_code == 0, result.output
+    hook_path = project / ".git" / "hooks" / "pre-push"
+    assert hook_path.exists()
+    content = hook_path.read_text()
+    assert HOOK_MARKER in content
+    assert "hooks check" in content
+    assert os.access(hook_path, os.X_OK)
+
+
+def test_hooks_install_refuses_to_overwrite_without_force(project: Path):
+    hook_path = project / ".git" / "hooks" / "pre-push"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("#!/bin/sh\necho custom hook\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "install"])
+    assert result.exit_code != 0
+    assert "custom hook" in hook_path.read_text()
+
+
+def test_hooks_install_force_overwrites(project: Path):
+    hook_path = project / ".git" / "hooks" / "pre-push"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("#!/bin/sh\necho old\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "install", "--force"])
+    assert result.exit_code == 0, result.output
+    assert HOOK_MARKER in hook_path.read_text()
+
+
+def test_hooks_uninstall_removes_depman_hook(project: Path):
+    runner = CliRunner()
+    runner.invoke(cli, ["--root", str(project), "hooks", "install"])
+    hook_path = project / ".git" / "hooks" / "pre-push"
+    assert hook_path.exists()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "uninstall"])
+    assert result.exit_code == 0, result.output
+    assert not hook_path.exists()
+
+
+def test_hooks_uninstall_leaves_foreign_hook_alone(project: Path):
+    hook_path = project / ".git" / "hooks" / "pre-push"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text("#!/bin/sh\necho custom hook\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "uninstall"])
+    assert result.exit_code == 0, result.output
+    assert hook_path.exists()
+    assert "custom hook" in hook_path.read_text()
+
+
+def test_hooks_check_reports_dirty_dep_and_exits_zero(project: Path):
+    (project / "deps" / "widget" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "check"])
+    assert result.exit_code == 0, result.output
+    assert "1 repo(s) have local issues" in result.output
+    assert _dep_key() in result.output
+
+
+def test_hooks_check_silent_when_clean(project: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "hooks", "check"])
+    assert result.exit_code == 0, result.output
+    # stdout is the meaningful channel here; diagnostic noise (e.g. find_all_configs's
+    # @timeit) is expected on stderr and mixed into .output, so check stdout alone.
+    assert result.stdout.strip() == ""

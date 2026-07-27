@@ -19,6 +19,7 @@ import click
 from git import GitCommandError, Repo
 from git.exc import HookExecutionError
 
+from depman.backends import get_backend
 from depman.utils.configs import get_configs_and_repos, gitman_declared_order
 
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
@@ -223,7 +224,61 @@ def _revert_repo(repo: Repo, repo_path: str) -> None:
     click.echo(f'    Recover with: git -C "{repo.working_tree_dir}" stash pop')
 
 
-def _review_repo(repo: Repo, repo_path: str) -> Optional[str]:
+def _stale_locked_deps(configs: Optional[Dict[str, Any]], repo_path: str) -> List[str]:
+    """
+    Dep names in repo_path's OWN gitman.yml that ARE locked (have a rev_locked) but
+    whose locked rev doesn't match what's actually installed. A dep with no lock at
+    all (rev_locked is None -- the project simply doesn't use gitman's locking) is
+    not "stale", it's just unlocked, so it's excluded here.
+    """
+    if not configs:
+        return []
+    config_entry = configs.get("configs", {}).get(repo_path)
+    if not config_entry:
+        return []
+    return [
+        dep_info.get("name", dep_path)
+        for dep_path, dep_info in config_entry.get("deps", {}).items()
+        if dep_info.get("rev_locked") is not None and dep_info.get("rev_match") is False
+    ]
+
+
+def _update_subproject_lock(
+    repo: Repo, repo_path: str, stale_deps: List[str], configs: Optional[Dict[str, Any]]
+) -> None:
+    if not click.confirm(
+        f"Relock gitman.yml in {repo_path} for {len(stale_deps)} dep(s) "
+        f"({', '.join(stale_deps)})? This writes the currently-installed revisions "
+        "into sources_locked.",
+        default=False,
+    ):
+        click.echo("Cancelled.")
+        return
+    backend_name = (configs or {}).get("configs", {}).get(repo_path, {}).get("backend")
+    backend = get_backend(backend_name) if backend_name else None
+    if backend is None:
+        click.echo(click.style(
+            f"❌ No config backend registered for '{backend_name}' -- can't relock {repo_path}.",
+            fg="red"))
+        return
+    try:
+        backend.relock(Path(repo.working_tree_dir), stale_deps)
+    except Exception as e:
+        click.echo(click.style(f"❌ Relock failed for {repo_path}: {e}", fg="red"))
+        return
+    click.echo(click.style(f"✅ Relocked gitman.yml in {repo_path}.", fg="green"))
+    # relock() just synced the lock to the currently-installed revs, so every dep
+    # in this config now matches -- update our in-memory snapshot too, otherwise
+    # _stale_locked_deps would keep reporting the same stale deps every loop
+    # iteration (configs was only scanned once, before this review started).
+    if configs:
+        for dep_info in configs.get("configs", {}).get(repo_path, {}).get("deps", {}).values():
+            dep_info["rev_match"] = True
+
+
+def _review_repo(
+    repo: Repo, repo_path: str, configs: Optional[Dict[str, Any]] = None
+) -> Optional[str]:
     """Interact with the user about a single repo. Returns 'quit' to stop the whole review."""
     while True:
         click.echo(click.style(f"\n=== {repo_path} ===", bold=True, fg="cyan"))
@@ -231,13 +286,26 @@ def _review_repo(repo: Repo, repo_path: str) -> Optional[str]:
         if files:
             _print_file_list(files)
         else:
+            click.echo(click.style("  Working tree clean.", fg="yellow"))
+
+        stale_deps = _stale_locked_deps(configs, repo_path)
+        if stale_deps:
             click.echo(click.style(
-                "  Working tree clean — only unpushed commits here.", fg="yellow"))
+                f"⚠️  This subproject's gitman.yml lock is stale for {len(stale_deps)} "
+                f"dep(s): {', '.join(stale_deps)}", fg="yellow"))
+
+        choices = ["c", "r", "d", "p"]
+        if stale_deps:
+            choices.append("u")
+        choices += ["s", "q"]
+        prompt_label = "commit / revert / diff / push" + (
+            " / update-lock" if stale_deps else "") + " / skip / quit"
+        default_choice = "u" if (stale_deps and not files) else ("p" if not files else "s")
 
         choice = click.prompt(
-            "commit / revert / diff / push / skip / quit",
-            type=click.Choice(["c", "r", "d", "p", "s", "q"]),
-            default="p" if not files else "s",
+            prompt_label,
+            type=click.Choice(choices),
+            default=default_choice,
             show_choices=True,
         )
 
@@ -271,9 +339,13 @@ def _review_repo(repo: Repo, repo_path: str) -> Optional[str]:
             # loop back: re-show the (still up to date) file list and re-prompt
         elif choice == "p":
             _push_repo(repo, repo_path)
-            if not files:
-                return None  # nothing else to decide for a clean repo
-            # working tree is still dirty: loop back to decide its fate next
+            if not files and not stale_deps:
+                return None  # nothing else to decide for a clean, non-stale repo
+            # working tree is still dirty, or there's a stale lock still pending:
+            # loop back to decide its fate next
+        elif choice == "u":
+            _update_subproject_lock(repo, repo_path, stale_deps, configs)
+            # loop back: gitman.yml is now a changed file in this same repo
         else:
             click.echo(f"Skipped {repo_path}")
             return None
@@ -308,20 +380,21 @@ def run_review(
     needs_review = {
         path: info
         for path, info in git_repos["repos"].items()
-        if info["has_uncommitted"] or info["has_unpushed"]
+        if info["has_uncommitted"] or info["has_unpushed"] or _stale_locked_deps(configs, path)
     }
     if not needs_review:
         click.echo(click.style(
-            "✅ No uncommitted changes or unpushed commits in any repo.", fg="green"))
+            "✅ No uncommitted changes, unpushed commits, or stale locks in any repo.",
+            fg="green"))
         return
 
     click.echo(click.style(
-        f"\nFound {len(needs_review)} repo(s) with uncommitted changes or unpushed commits.",
+        f"\nFound {len(needs_review)} repo(s) needing attention.",
         bold=True))
 
     for repo_path in _ordered_repo_paths(needs_review.keys(), order, configs):
         repo = Repo(root / repo_path)
-        if _review_repo(repo, repo_path) == "quit":
+        if _review_repo(repo, repo_path, configs) == "quit":
             click.echo("Stopping review.")
             break
 
