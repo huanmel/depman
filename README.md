@@ -158,6 +158,7 @@ A live scan (`check`/`list`/`review` without `-c`) fetches every discovered repo
 - `analyze_configs_repos` no longer re-fetches every dep's remote (it was redundantly refetching what `find_all_git_repos` had just fetched); `find_all_git_repos` now scans/fetches repos concurrently (`-j`/`--jobs`, default 8) instead of one at a time
 - Status table / `list` row order is now deterministic (root first, then gitman.yml-declared depth-first order, undeclared repos last) instead of raw scan-completion order, which became nondeterministic once scanning went concurrent; list-mode's `select #:` index was fixed to match
 - `depman review` no longer writes `.cache_*.yaml` files into the repo it's reviewing (it now reuses `check`/`list`'s scan machinery internally but opts out of the cache-write side effect, which was dirtying the very repo being reviewed with new untracked files)
+- `review`'s commit step no longer crashes the whole session if a repo's `post-commit` hook fails (e.g. a repo configured for git-lfs where `git-lfs` isn't on `PATH`) — the commit itself already succeeded by the time such a hook runs (`post-commit` is documented as advisory-only), so this is now reported as a warning and the review continues
 
 ## Development
 

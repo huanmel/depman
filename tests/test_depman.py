@@ -7,6 +7,7 @@ import pytest
 import yaml
 from click.testing import CliRunner
 from git import Repo
+from git.exc import HookExecutionError
 
 from depman.cli import cli
 from depman.utils.configs import (
@@ -233,6 +234,39 @@ def test_review_commit_commits_dirty_repo(project: Path):
     result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n")
     assert result.exit_code == 0, result.output
     assert "About to commit:" in result.output
+    assert "Committed ." in result.output
+    assert not Repo(project).is_dirty(untracked_files=True)
+
+
+def test_review_commit_survives_failing_post_commit_hook(project: Path, monkeypatch):
+    """A failing post-commit hook (e.g. git-lfs not on PATH) must not crash the
+    review session -- the commit already succeeds before the hook runs.
+
+    Simulated by monkeypatching IndexFile.commit rather than installing a real
+    hook script: GitPython invokes hooks on Windows via a bare `bash.exe` PATH
+    lookup, which is unreliable in environments with more than one bash.exe on
+    PATH (e.g. a WSL launcher stub ahead of Git's own bash) -- an environment
+    quirk unrelated to the behavior under test here.
+    """
+    from git.index.base import IndexFile
+
+    original_commit = IndexFile.commit
+
+    def fake_commit(self, message, *args, **kwargs):
+        result = original_commit(self, message, *args, **kwargs)  # commit really happens
+        raise HookExecutionError(
+            "post-commit", 2,
+            "This repository is configured for Git LFS but 'git-lfs' was not found on your path.\n",
+            "",
+        )
+
+    monkeypatch.setattr(IndexFile, "commit", fake_commit)
+
+    (project / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n")
+    assert result.exit_code == 0, result.output
+    assert "post-commit hook failed" in result.output
     assert "Committed ." in result.output
     assert not Repo(project).is_dirty(untracked_files=True)
 

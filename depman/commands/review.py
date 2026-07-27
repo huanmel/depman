@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import click
 from git import GitCommandError, Repo
+from git.exc import HookExecutionError
 
 from depman.utils.configs import get_configs_and_repos, gitman_declared_order
 
@@ -101,7 +102,19 @@ def _commit_repo(repo: Repo, repo_path: str, files: List[Tuple[str, str]]) -> bo
         return False
     message = click.prompt("Commit message", default=f"wip: {repo_path}")
     repo.git.add(A=True)
-    repo.index.commit(message)
+    try:
+        repo.index.commit(message)
+    except HookExecutionError as e:
+        # The commit itself already succeeded -- post-commit hooks run after the
+        # commit object and branch ref exist, and per githooks(5) are advisory
+        # only ("cannot affect the outcome of git commit"). GitPython raises
+        # anyway on a non-zero hook exit. Common cause: the repo is configured
+        # for git-lfs (has a git-lfs post-commit hook) but 'git-lfs' isn't on
+        # PATH in this environment.
+        click.echo(click.style(
+            f"⚠️  Committed {repo_path}: {message} (but its post-commit hook failed "
+            f"-- commit succeeded regardless): {e}", fg="yellow"))
+        return True
     click.echo(click.style(f"✅ Committed {repo_path}: {message}", fg="green"))
     return True
 
