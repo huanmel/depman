@@ -9,38 +9,44 @@ Usage:
     # depman gm install  # Wraps gitman install
 
 import click
+import typer
 from pathlib import Path
 from typing import Optional
-from .commands.gm_commands import gm
-from .commands.checker import check_cmd, list_cmd
-from .commands.review import review_cmd
-from .commands.hooks import hooks
+from .commands.gm_commands import gm_app
+from .commands.checker import check_cmd, list_cmd, CONTEXT_SETTINGS as CHECKER_CONTEXT_SETTINGS
+from .commands.review import review_cmd, CONTEXT_SETTINGS as REVIEW_CONTEXT_SETTINGS
+from .commands.hooks import hooks_app
 from .utils.configs import find_git_root
-
-
 
 
 CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 
-@click.group(context_settings=CONTEXT_SETTINGS)
-@click.option("--root", type=str, default=None, help="Git root path (auto-detects).")
-@click.pass_context
-def cli(ctx: click.Context, root: Optional[str]):
+app = typer.Typer(
+    context_settings=CONTEXT_SETTINGS,
+    help="Depman: Enhance Gitman dependency management.",
+)
+
+
+@app.callback()
+def main(ctx: typer.Context, root: Optional[str] = typer.Option(None, "--root", help="Git root path (auto-detects).")):
     """Depman: Enhance Gitman dependency management."""
     if root is None:
         root = find_git_root()
         if root is None:
             raise click.ClickException("No Git root found. Run from a Git repo.")
-    ctx.ensure_object(dict)
-    ctx.obj["root"] = Path(root)
+    ctx.obj = {"root": Path(root)}
 
 
-cli.add_command(gm)
-cli.add_command(check_cmd)
-cli.add_command(list_cmd)
-cli.add_command(review_cmd)
-cli.add_command(hooks)
+app.add_typer(gm_app)
+app.command("check", context_settings=CHECKER_CONTEXT_SETTINGS)(check_cmd)
+app.command("list", context_settings=CHECKER_CONTEXT_SETTINGS)(list_cmd)
+app.command("review", context_settings=REVIEW_CONTEXT_SETTINGS)(review_cmd)
+app.add_typer(hooks_app)
+
+# Exposed as an ordinary click.Group so the `depman = "depman.cli:cli"` entry point
+# in pyproject.toml and CliRunner-based tests keep invoking it exactly as before.
+cli = typer.main.get_command(app)
 
 
 if __name__ == "__main__":
-    cli()
+    app()

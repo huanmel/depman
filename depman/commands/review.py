@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import click
+import typer
 from git import GitCommandError, Repo
 from git.exc import HookExecutionError
 
@@ -48,9 +49,9 @@ def _changed_files(repo: Repo) -> List[Tuple[str, str]]:
 
 
 def _print_file_list(files: List[Tuple[str, str]]) -> None:
-    click.echo(click.style("Changed files:", fg="yellow"))
+    typer.echo(typer.style("Changed files:", fg="yellow"))
     for i, (code, path) in enumerate(files):
-        click.echo(f"  [{i}] {code.strip() or '??':<3} {path}")
+        typer.echo(f"  [{i}] {code.strip() or '??':<3} {path}")
 
 
 def _diff_for_file(repo: Repo, path: str) -> str:
@@ -75,7 +76,7 @@ def _diff_for_file(repo: Repo, path: str) -> str:
 def _show_diff_menu(repo: Repo, files: List[Tuple[str, str]]) -> None:
     if not files:
         return
-    selection = click.prompt(
+    selection = typer.prompt(
         "Show diff for file # (blank = all)", default="", show_default=False
     )
     if selection.strip() == "":
@@ -83,25 +84,66 @@ def _show_diff_menu(repo: Repo, files: List[Tuple[str, str]]) -> None:
     elif selection.isdigit() and 0 <= int(selection) < len(files):
         targets = [files[int(selection)][1]]
     else:
-        click.echo(click.style(f"Invalid selection: {selection}", fg="red"))
+        typer.echo(typer.style(f"Invalid selection: {selection}", fg="red"))
         return
     for path in targets:
-        click.echo(click.style(f"--- {path} ---", dim=True))
-        click.echo(_diff_for_file(repo, path))
+        typer.echo(typer.style(f"--- {path} ---", dim=True))
+        typer.echo(_diff_for_file(repo, path))
 
 
-def _commit_repo(repo: Repo, repo_path: str, files: List[Tuple[str, str]]) -> bool:
+def _consuming_configs_needing_relock(
+    configs: Optional[Dict[str, Any]], repo_path: str, new_rev: str
+) -> List[str]:
+    """
+    Which OTHER configs declare repo_path as a dependency with a real lock (rev_locked
+    is not None) that new_rev no longer matches? This is the mirror image of
+    _stale_locked_deps: that looks at a config's own children, this looks at who
+    consumes repo_path as a child. A dep with no lock at all is deliberately excluded,
+    same rationale as _stale_locked_deps.
+    """
+    if not configs:
+        return []
+    consumers = []
+    for config_path, config_entry in configs.get("configs", {}).items():
+        dep_info = config_entry.get("deps", {}).get(repo_path)
+        if not dep_info:
+            continue
+        rev_locked = dep_info.get("rev_locked")
+        if rev_locked is not None and rev_locked != new_rev:
+            consumers.append(config_path)
+    return consumers
+
+
+def _warn_consuming_configs_stale(
+    repo: Repo, repo_path: str, configs: Optional[Dict[str, Any]]
+) -> None:
+    new_rev = repo.head.commit.hexsha
+    consumers = _consuming_configs_needing_relock(configs, repo_path, new_rev)
+    if not consumers:
+        return
+    typer.echo(typer.style(
+        f"⚠️  This commit leaves {repo_path} out of sync with the lock in "
+        f"{len(consumers)} config(s): {', '.join(consumers)} -- consider relocking "
+        "there before pushing.", fg="yellow"))
+
+
+def _commit_repo(
+    repo: Repo, repo_path: str, files: List[Tuple[str, str]],
+    configs: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Returns True if a commit was made, False if the user cancelled."""
+    _offer_lock_before_commit(repo, repo_path, configs)
+    files = _changed_files(repo)  # refresh: a lock just run above may have changed gitman.yml
     new_files = [path for code, path in files if code.strip() in ("??", "A")]
-    click.echo(click.style("About to commit:", fg="green"))
+    typer.echo(typer.style("About to commit:", fg="green"))
     _print_file_list(files)
     if new_files:
-        click.echo(click.style(
+        typer.echo(typer.style(
             f"  ({len(new_files)} new/untracked file(s) will be added)", fg="yellow"))
-    if not click.confirm(f"Commit all {len(files)} file(s) in {repo_path}?", default=True):
-        click.echo("Cancelled.")
+    if not typer.confirm(f"Commit all {len(files)} file(s) in {repo_path}?", default=True):
+        typer.echo("Cancelled.")
         return False
-    message = click.prompt("Commit message", default=f"wip: {repo_path}")
+    message = typer.prompt("Commit message", default=f"wip: {repo_path}")
     repo.git.add(A=True)
     try:
         repo.index.commit(message)
@@ -112,11 +154,13 @@ def _commit_repo(repo: Repo, repo_path: str, files: List[Tuple[str, str]]) -> bo
         # anyway on a non-zero hook exit. Common cause: the repo is configured
         # for git-lfs (has a git-lfs post-commit hook) but 'git-lfs' isn't on
         # PATH in this environment.
-        click.echo(click.style(
+        typer.echo(typer.style(
             f"⚠️  Committed {repo_path}: {message} (but its post-commit hook failed "
             f"-- commit succeeded regardless): {e}", fg="yellow"))
+        _warn_consuming_configs_stale(repo, repo_path, configs)
         return True
-    click.echo(click.style(f"✅ Committed {repo_path}: {message}", fg="green"))
+    typer.echo(typer.style(f"✅ Committed {repo_path}: {message}", fg="green"))
+    _warn_consuming_configs_stale(repo, repo_path, configs)
     return True
 
 
@@ -137,11 +181,11 @@ def _unpushed_commits(repo: Repo, branch: str) -> List:
 
 def _print_unpushed_commits(commits: List) -> None:
     if not commits:
-        click.echo(click.style("  (no new commits to push)", fg="yellow"))
+        typer.echo(typer.style("  (no new commits to push)", fg="yellow"))
         return
-    click.echo(click.style(f"Commits to push ({len(commits)}):", fg="yellow"))
+    typer.echo(typer.style(f"Commits to push ({len(commits)}):", fg="yellow"))
     for commit in commits:
-        click.echo(f"  {commit.hexsha[:7]}  {commit.message.splitlines()[0]}")
+        typer.echo(f"  {commit.hexsha[:7]}  {commit.message.splitlines()[0]}")
 
 
 def _squash_commit_message(commits: List) -> str:
@@ -160,32 +204,32 @@ def _squash_unpushed_commits(repo: Repo, repo_path: str, commits: List) -> bool:
         return False
     oldest = commits[-1]
     if not oldest.parents:
-        click.echo(click.style(
+        typer.echo(typer.style(
             "Cannot squash: that would reach the repo's very first commit.", fg="red"))
         return False
 
     default_message = _squash_commit_message(commits)
-    click.echo(click.style(f"Combine these {len(commits)} commits into one:", fg="green"))
-    click.echo(default_message)
-    if not click.confirm(f"Squash {len(commits)} commits into one before pushing?", default=False):
+    typer.echo(typer.style(f"Combine these {len(commits)} commits into one:", fg="green"))
+    typer.echo(default_message)
+    if not typer.confirm(f"Squash {len(commits)} commits into one before pushing?", default=False):
         return False
 
-    message = click.prompt(
+    message = typer.prompt(
         "Commit message (blank = use combined message above)", default="", show_default=False
     )
     final_message = message.strip() or default_message
     repo.git.reset("--soft", oldest.parents[0].hexsha)
     repo.git.commit("-m", final_message)
-    click.echo(click.style(f"✅ Squashed {len(commits)} commits into one in {repo_path}.", fg="green"))
+    typer.echo(typer.style(f"✅ Squashed {len(commits)} commits into one in {repo_path}.", fg="green"))
     return True
 
 
 def _push_repo(repo: Repo, repo_path: str) -> None:
     if not hasattr(repo.remotes, "origin"):
-        click.echo(click.style(f"❌ {repo_path} has no 'origin' remote configured.", fg="red"))
+        typer.echo(typer.style(f"❌ {repo_path} has no 'origin' remote configured.", fg="red"))
         return
     if repo.head.is_detached:
-        click.echo(click.style(
+        typer.echo(typer.style(
             f"❌ {repo_path} is in detached HEAD state; check out a branch before pushing.",
             fg="red"))
         return
@@ -199,17 +243,17 @@ def _push_repo(repo: Repo, repo_path: str) -> None:
         commits = _unpushed_commits(repo, branch)
         _print_unpushed_commits(commits)
 
-    if not click.confirm(f"Push {repo_path} ({branch}) to origin?", default=False):
-        click.echo("Cancelled.")
+    if not typer.confirm(f"Push {repo_path} ({branch}) to origin?", default=False):
+        typer.echo("Cancelled.")
         return
     try:
         output = repo.git.push("origin", branch)
     except GitCommandError as e:
-        click.echo(click.style(f"❌ Push failed for {repo_path}: {e}", fg="red"))
+        typer.echo(typer.style(f"❌ Push failed for {repo_path}: {e}", fg="red"))
         return
-    click.echo(click.style(f"✅ Pushed {repo_path} ({branch}) to origin.", fg="green"))
+    typer.echo(typer.style(f"✅ Pushed {repo_path} ({branch}) to origin.", fg="green"))
     if output:
-        click.echo(output)
+        typer.echo(output)
 
 
 def _revert_repo(repo: Repo, repo_path: str) -> None:
@@ -217,11 +261,11 @@ def _revert_repo(repo: Repo, repo_path: str) -> None:
     try:
         repo.git.stash("push", "-u", "-m", stash_name)
     except GitCommandError as e:
-        click.echo(click.style(f"❌ Could not revert {repo_path}: {e}", fg="red"))
+        typer.echo(typer.style(f"❌ Could not revert {repo_path}: {e}", fg="red"))
         return
-    click.echo(click.style(
+    typer.echo(typer.style(
         f"⚠️  Reverted {repo_path} — changes safely stashed as '{stash_name}'.", fg="yellow"))
-    click.echo(f'    Recover with: git -C "{repo.working_tree_dir}" stash pop')
+    typer.echo(f'    Recover with: git -C "{repo.working_tree_dir}" stash pop')
 
 
 def _stale_locked_deps(configs: Optional[Dict[str, Any]], repo_path: str) -> List[str]:
@@ -243,37 +287,128 @@ def _stale_locked_deps(configs: Optional[Dict[str, Any]], repo_path: str) -> Lis
     ]
 
 
-def _update_subproject_lock(
-    repo: Repo, repo_path: str, stale_deps: List[str], configs: Optional[Dict[str, Any]]
-) -> None:
-    if not click.confirm(
-        f"Relock gitman.yml in {repo_path} for {len(stale_deps)} dep(s) "
-        f"({', '.join(stale_deps)})? This writes the currently-installed revisions "
-        "into sources_locked.",
-        default=False,
-    ):
-        click.echo("Cancelled.")
-        return
+def _relock_config(
+    repo: Repo, repo_path: str, dep_names: List[str], configs: Optional[Dict[str, Any]]
+) -> bool:
+    """
+    Runs the config backend's relock() for repo_path's own config. gitman's lock()
+    relocks every declared dep to its currently-installed revision in one shot (it
+    doesn't support locking a subset), so dep_names is passed through for the
+    interface but not relied on here. Returns True on success and refreshes the
+    in-memory configs snapshot to match -- otherwise the same staleness/unlocked-ness
+    would keep getting reported every loop iteration, since configs was only scanned
+    once before this review started.
+    """
     backend_name = (configs or {}).get("configs", {}).get(repo_path, {}).get("backend")
     backend = get_backend(backend_name) if backend_name else None
     if backend is None:
-        click.echo(click.style(
+        typer.echo(typer.style(
             f"❌ No config backend registered for '{backend_name}' -- can't relock {repo_path}.",
             fg="red"))
-        return
+        return False
     try:
-        backend.relock(Path(repo.working_tree_dir), stale_deps)
+        backend.relock(Path(repo.working_tree_dir), dep_names)
     except Exception as e:
-        click.echo(click.style(f"❌ Relock failed for {repo_path}: {e}", fg="red"))
-        return
-    click.echo(click.style(f"✅ Relocked gitman.yml in {repo_path}.", fg="green"))
-    # relock() just synced the lock to the currently-installed revs, so every dep
-    # in this config now matches -- update our in-memory snapshot too, otherwise
-    # _stale_locked_deps would keep reporting the same stale deps every loop
-    # iteration (configs was only scanned once, before this review started).
+        typer.echo(typer.style(f"❌ Relock failed for {repo_path}: {e}", fg="red"))
+        return False
+    typer.echo(typer.style(f"✅ Relocked gitman.yml in {repo_path}.", fg="green"))
     if configs:
         for dep_info in configs.get("configs", {}).get(repo_path, {}).get("deps", {}).values():
             dep_info["rev_match"] = True
+            dep_info["rev_locked"] = dep_info.get("rev_installed")
+    return True
+
+
+def _offer_manual_relock(
+    repo: Repo, repo_path: str, configs: Optional[Dict[str, Any]]
+) -> None:
+    """Manual counterpart to the top-level 'u' menu action: offered whenever repo_path
+    owns a config file at all, not just when something is actually unlocked/stale."""
+    summary = _describe_pending_lock(configs, repo_path)
+    if summary is not None:
+        prompt = (
+            f"Relock gitman.yml in {repo_path} for {summary}? This writes the "
+            "currently-installed revisions into sources_locked."
+        )
+    else:
+        prompt = (
+            f"{repo_path}'s gitman.yml has no unlocked or stale deps right now. "
+            "Run 'gitman lock' anyway?"
+        )
+    if not typer.confirm(prompt, default=False):
+        typer.echo("Cancelled.")
+        return
+    unlocked = _unlocked_deps(configs, repo_path)
+    stale = _stale_locked_deps(configs, repo_path)
+    _relock_config(repo, repo_path, unlocked + stale, configs)
+
+
+def _unlocked_deps(configs: Optional[Dict[str, Any]], repo_path: str) -> List[str]:
+    """
+    Dep names in repo_path's OWN gitman.yml that have no lock at all (rev_locked is
+    None) -- the mirror image of _stale_locked_deps's guard, which deliberately
+    excludes these as "just unlocked, not stale".
+    """
+    if not configs:
+        return []
+    config_entry = configs.get("configs", {}).get(repo_path)
+    if not config_entry:
+        return []
+    return [
+        dep_info.get("name", dep_path)
+        for dep_path, dep_info in config_entry.get("deps", {}).items()
+        if dep_info.get("rev_locked") is None
+    ]
+
+
+def _has_config(configs: Optional[Dict[str, Any]], repo_path: str) -> bool:
+    """Whether repo_path owns a config file of its own (e.g. a gitman.yml), regardless
+    of how many deps it declares or their lock state."""
+    return bool((configs or {}).get("configs", {}).get(repo_path))
+
+
+def _describe_pending_lock(configs: Optional[Dict[str, Any]], repo_path: str) -> Optional[str]:
+    """Human-readable 'N unlocked (...); N stale (...)' summary of repo_path's own
+    deps needing a lock, or None if it has no config or nothing is pending."""
+    unlocked = _unlocked_deps(configs, repo_path)
+    stale = _stale_locked_deps(configs, repo_path)
+    if not unlocked and not stale:
+        return None
+    parts = []
+    if unlocked:
+        parts.append(f"{len(unlocked)} unlocked ({', '.join(unlocked)})")
+    if stale:
+        parts.append(f"{len(stale)} stale ({', '.join(stale)})")
+    return "; ".join(parts)
+
+
+def _offer_lock_before_commit(
+    repo: Repo, repo_path: str, configs: Optional[Dict[str, Any]]
+) -> None:
+    """
+    Before committing, offer to gitman-lock repo_path's own gitman.yml if it has any
+    dep needing it -- either never locked at all, or locked but stale (drifted from
+    what's installed). Both cases go through one combined prompt and one relock
+    call, since gitman's lock() relocks the whole file in one shot regardless of
+    which subset needed it. Declining never blocks the commit that follows. (A
+    repo with nothing pending is still separately offered the top-level 'u' action
+    in _review_repo whenever it owns a config file at all, unaffected by this.)
+    """
+    summary = _describe_pending_lock(configs, repo_path)
+    if summary is None:
+        return
+    typer.echo(typer.style(
+        f"This subproject's gitman.yml has dep(s) needing a lock: {summary}",
+        fg="yellow"))
+    if not typer.confirm(
+        f"Run 'gitman lock' for {repo_path} before committing? This writes the "
+        "currently-installed revisions into sources_locked.",
+        default=False,
+    ):
+        return
+    unlocked = _unlocked_deps(configs, repo_path)
+    stale = _stale_locked_deps(configs, repo_path)
+    _relock_config(repo, repo_path, unlocked + stale, configs)
 
 
 def _review_repo(
@@ -281,28 +416,29 @@ def _review_repo(
 ) -> Optional[str]:
     """Interact with the user about a single repo. Returns 'quit' to stop the whole review."""
     while True:
-        click.echo(click.style(f"\n=== {repo_path} ===", bold=True, fg="cyan"))
+        typer.echo(typer.style(f"\n=== {repo_path} ===", bold=True, fg="cyan"))
         files = _changed_files(repo)
         if files:
             _print_file_list(files)
         else:
-            click.echo(click.style("  Working tree clean.", fg="yellow"))
+            typer.echo(typer.style("  Working tree clean.", fg="yellow"))
 
         stale_deps = _stale_locked_deps(configs, repo_path)
         if stale_deps:
-            click.echo(click.style(
+            typer.echo(typer.style(
                 f"⚠️  This subproject's gitman.yml lock is stale for {len(stale_deps)} "
                 f"dep(s): {', '.join(stale_deps)}", fg="yellow"))
 
+        has_config = _has_config(configs, repo_path)
         choices = ["c", "r", "d", "p"]
-        if stale_deps:
+        if has_config:
             choices.append("u")
         choices += ["s", "q"]
         prompt_label = "commit / revert / diff / push" + (
-            " / update-lock" if stale_deps else "") + " / skip / quit"
+            " / update-lock" if has_config else "") + " / skip / quit"
         default_choice = "u" if (stale_deps and not files) else ("p" if not files else "s")
 
-        choice = click.prompt(
+        choice = typer.prompt(
             prompt_label,
             type=click.Choice(choices),
             default=default_choice,
@@ -313,27 +449,27 @@ def _review_repo(
             return "quit"
         elif choice == "c":
             if not files:
-                click.echo("Nothing to commit.")
+                typer.echo("Nothing to commit.")
                 continue
-            if _commit_repo(repo, repo_path, files):
+            if _commit_repo(repo, repo_path, files, configs):
                 _push_repo(repo, repo_path)
             return None
         elif choice == "r":
             if not files:
-                click.echo("Nothing to revert.")
+                typer.echo("Nothing to revert.")
                 continue
-            if click.confirm(
+            if typer.confirm(
                 f"Really revert {repo_path}? Changes will be stashed (recoverable) "
                 "and the working tree reset to HEAD",
                 default=False,
             ):
                 _revert_repo(repo, repo_path)
             else:
-                click.echo("Cancelled.")
+                typer.echo("Cancelled.")
             return None
         elif choice == "d":
             if not files:
-                click.echo("No changed files to diff.")
+                typer.echo("No changed files to diff.")
                 continue
             _show_diff_menu(repo, files)
             # loop back: re-show the (still up to date) file list and re-prompt
@@ -344,10 +480,10 @@ def _review_repo(
             # working tree is still dirty, or there's a stale lock still pending:
             # loop back to decide its fate next
         elif choice == "u":
-            _update_subproject_lock(repo, repo_path, stale_deps, configs)
+            _offer_manual_relock(repo, repo_path, configs)
             # loop back: gitman.yml is now a changed file in this same repo
         else:
-            click.echo(f"Skipped {repo_path}")
+            typer.echo(f"Skipped {repo_path}")
             return None
 
 
@@ -383,43 +519,39 @@ def run_review(
         if info["has_uncommitted"] or info["has_unpushed"] or _stale_locked_deps(configs, path)
     }
     if not needs_review:
-        click.echo(click.style(
+        typer.echo(typer.style(
             "✅ No uncommitted changes, unpushed commits, or stale locks in any repo.",
             fg="green"))
         return
 
-    click.echo(click.style(
+    typer.echo(typer.style(
         f"\nFound {len(needs_review)} repo(s) needing attention.",
         bold=True))
 
     for repo_path in _ordered_repo_paths(needs_review.keys(), order, configs):
         repo = Repo(root / repo_path)
         if _review_repo(repo, repo_path, configs) == "quit":
-            click.echo("Stopping review.")
+            typer.echo("Stopping review.")
             break
 
-    click.echo(click.style("\nReview complete.", bold=True))
+    typer.echo(typer.style("\nReview complete.", bold=True))
 
 
-@click.command("review", context_settings=CONTEXT_SETTINGS)
-@click.option(
-    "--use-cache",
-    "-c",
-    is_flag=True,
-    default=False,
-    help="use the YAML snapshot from a previous 'check'/'list' scan instead of rescanning "
-    "(faster, no network fetch; which repos are dirty may be stale if scanned a while ago).",
-)
-@click.option("--order", type=click.Choice(ORDER_CHOICES), default="root-last", help=ORDER_HELP)
-@click.option(
-    "--jobs",
-    "-j",
-    type=int,
-    default=8,
-    help="number of repos to fetch/scan concurrently during a live scan (default: 8).",
-)
-@click.pass_context
-def review_cmd(ctx: click.Context, use_cache: bool, order: str, jobs: int):
+def review_cmd(
+    ctx: typer.Context,
+    use_cache: bool = typer.Option(
+        False, "--use-cache", "-c",
+        help="use the YAML snapshot from a previous 'check'/'list' scan instead of rescanning "
+        "(faster, no network fetch; which repos are dirty may be stale if scanned a while ago).",
+    ),
+    order: str = typer.Option(
+        "root-last", "--order", click_type=click.Choice(ORDER_CHOICES), help=ORDER_HELP,
+    ),
+    jobs: int = typer.Option(
+        8, "--jobs", "-j",
+        help="number of repos to fetch/scan concurrently during a live scan (default: 8).",
+    ),
+):
     """Semi-automatic review: commit or revert changes in each dirty repo, one at a time."""
     root: Path = ctx.obj["root"]
     # write_cache=False: a standalone `review` shouldn't leave new untracked cache

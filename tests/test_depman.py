@@ -102,6 +102,117 @@ def subproject_project(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def locked_leaf_project(tmp_path: Path) -> Path:
+    """
+    Root -> 'sub' (owns its own gitman.yml) -> 'leaf'. Unlike subproject_project,
+    'sub's lock for 'leaf' is genuinely in sync (locked to leaf's actual current
+    rev) at fixture-build time -- used to test that committing a NEW change
+    directly in 'leaf' is what creates the staleness, and that review's commit
+    step warns about it.
+    """
+    root = tmp_path / "project"
+    sub = root / "deps" / "sub"
+    leaf = sub / "deps" / "leaf"
+
+    _init_repo(root)
+    _init_repo(sub)
+    leaf_repo = _init_repo(leaf)
+    leaf_repo.create_remote("origin", str(leaf))
+
+    (root / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "sub", "repo": str(sub), "rev": "main"}],
+    }))
+
+    sub_repo = Repo(sub)
+    (sub / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "leaf", "repo": str(leaf), "rev": "main"}],
+        "sources_locked": [
+            {"name": "leaf", "repo": str(leaf), "rev": leaf_repo.head.commit.hexsha}
+        ],
+    }))
+    sub_repo.git.add(A=True)
+    sub_repo.git.commit("-m", "add gitman.yml locked to leaf's current rev")
+
+    return root
+
+
+@pytest.fixture
+def unlocked_leaf_project(tmp_path: Path) -> Path:
+    """
+    Root -> 'sub' (owns its own gitman.yml, committed and clean) -> 'leaf', where
+    'sub's gitman.yml declares 'leaf' with no sources_locked at all -- genuinely
+    unlocked, not stale. Used to test that committing some OTHER change in 'sub'
+    offers to gitman-lock 'leaf' first.
+    """
+    root = tmp_path / "project"
+    sub = root / "deps" / "sub"
+    leaf = sub / "deps" / "leaf"
+
+    _init_repo(root)
+    _init_repo(sub)
+    leaf_repo = _init_repo(leaf)
+    leaf_repo.create_remote("origin", str(leaf))
+
+    (root / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "sub", "repo": str(sub), "rev": "main"}],
+    }))
+
+    sub_repo = Repo(sub)
+    (sub / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "leaf", "repo": str(leaf), "rev": "main"}],
+    }))
+    sub_repo.git.add(A=True)
+    sub_repo.git.commit("-m", "add gitman.yml, never locked")
+
+    return root
+
+
+@pytest.fixture
+def mixed_lock_project(tmp_path: Path) -> Path:
+    """
+    Root -> 'sub' (owns its own gitman.yml, clean) -> two deps: 'leaf_a' (never
+    locked at all) and 'leaf_b' (locked but stale). Used to prove the pre-commit
+    lock offer combines both kinds of "needs a lock" into one prompt/relock.
+    """
+    root = tmp_path / "project"
+    sub = root / "deps" / "sub"
+    leaf_a = sub / "deps" / "leaf_a"
+    leaf_b = sub / "deps" / "leaf_b"
+
+    _init_repo(root)
+    _init_repo(sub)
+    leaf_a_repo = _init_repo(leaf_a)
+    leaf_a_repo.create_remote("origin", str(leaf_a))
+    leaf_b_repo = _init_repo(leaf_b)
+    leaf_b_repo.create_remote("origin", str(leaf_b))
+
+    (root / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [{"name": "sub", "repo": str(sub), "rev": "main"}],
+    }))
+
+    sub_repo = Repo(sub)
+    (sub / "gitman.yml").write_text(yaml.safe_dump({
+        "location": "deps",
+        "sources": [
+            {"name": "leaf_a", "repo": str(leaf_a), "rev": "main"},
+            {"name": "leaf_b", "repo": str(leaf_b), "rev": "main"},
+        ],
+        "sources_locked": [
+            {"name": "leaf_b", "repo": str(leaf_b), "rev": "0" * 40},
+        ],
+    }))
+    sub_repo.git.add(A=True)
+    sub_repo.git.commit("-m", "add gitman.yml: leaf_a unlocked, leaf_b stale")
+
+    return root
+
+
+@pytest.fixture
 def nested_order_project(tmp_path: Path) -> Path:
     """
     Root gitman.yml declares deps out of alphabetical order: [zeta, alpha].
@@ -258,12 +369,176 @@ def test_review_declining_relock_leaves_lock_untouched(subproject_project: Path)
 
 def test_review_no_stale_lock_warning_when_never_locked(project: Path):
     """A dep with no sources_locked at all is unlocked, not stale -- must not
-    trigger the stale-lock warning/'u' choice (the project fixture never locks)."""
+    trigger the stale-lock warning (the project fixture never locks). The
+    'update-lock' menu option itself still appears because root owns a gitman.yml
+    at all -- that's covered separately by test_review_update_lock_option_availability."""
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(project), "review"])
     assert result.exit_code == 0, result.output
     assert "gitman.yml lock is stale" not in result.output
+
+
+def test_review_update_lock_option_availability(
+    locked_leaf_project: Path, tmp_path: Path
+):
+    """'update-lock' is offered whenever a repo owns a gitman.yml at all -- even
+    with nothing unlocked or stale (locked_leaf_project's 'sub' is fully in sync)
+    -- and picking it still runs gitman lock via the no-pending-work message. A
+    standalone repo with no gitman.yml of its own never offers it."""
+    root = locked_leaf_project
+    # give 'sub' an unrelated change so it needs review at all (a fully clean,
+    # fully synced, never-unpushed repo wouldn't get a turn in the first place)
+    (root / "deps" / "sub" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    # sub's only turn: u (pick update-lock) -> y (confirm despite nothing pending)
+    # -> loop back (still dirty from the README change) -> s (skip)
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="u\ny\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "update-lock" in result.output
+    assert "has no unlocked or stale deps right now" in result.output
+    assert "Relocked gitman.yml" in result.output
+
+    standalone = tmp_path / "standalone"
+    _init_repo(standalone)
+    (standalone / "README.md").write_text("changed\n")
+    result = runner.invoke(cli, ["--root", str(standalone), "review"], input="s\n")
+    assert result.exit_code == 0, result.output
     assert "update-lock" not in result.output
+
+
+def test_review_commit_warns_when_it_invalidates_a_consuming_configs_lock(
+    locked_leaf_project: Path,
+):
+    """Committing a NEW change directly in 'leaf' moves its rev away from what
+    'sub's gitman.yml has locked -- review's commit step should warn about it,
+    naming 'sub' as the config that now needs relocking."""
+    root = locked_leaf_project
+    (root / "deps" / "sub" / "deps" / "leaf" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    # leaf's uncommitted change makes 'sub' show its gitlink as "modified content"
+    # too (ordinary nested-repo git behavior), so 'sub' needs a turn first -- blank
+    # skips it (default choice, unrelated to the feature under test). Then leaf:
+    # c (commit) -> confirm blank(yes) -> message blank(default); leaf has an
+    # origin remote (self-referencing) so push is then attempted and prompted too.
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="\nc\n\n\nn\n")
+    assert result.exit_code == 0, result.output
+    assert "out of sync with the lock" in result.output
+    assert _sub_key() in result.output
+
+
+def test_review_commit_no_warning_when_consuming_config_unlocked(project: Path):
+    """The 'project' fixture's root gitman.yml never locks 'widget' -- committing
+    a change in widget must not trigger the consuming-config-stale warning."""
+    (project / "deps" / "widget" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    # c (commit widget, no remote so push is a no-op) -> then "s" to skip root's turn
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "out of sync with the lock" not in result.output
+
+
+def test_review_commit_offers_to_lock_unlocked_deps(unlocked_leaf_project: Path):
+    """Committing some other change in 'sub' -- whose own gitman.yml declares
+    'leaf' with no lock at all -- offers to gitman-lock it first, and the
+    resulting sources_locked entry rides along in the same commit."""
+    root = unlocked_leaf_project
+    (root / "deps" / "sub" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    # sub's turn: c (commit) -> y (confirm lock) -> confirm blank(yes) -> message
+    # blank(default) -> no origin remote for sub, push is a no-op; root's turn: s (skip)
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\ny\n\n\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "1 unlocked (leaf)" in result.output
+    assert "Relocked gitman.yml" in result.output
+    assert "Committed" in result.output
+
+    sub_repo = Repo(root / "deps" / "sub")
+    assert not sub_repo.is_dirty(untracked_files=True)
+    leaf_repo = Repo(root / "deps" / "sub" / "deps" / "leaf")
+    locked = yaml.safe_load((root / "deps" / "sub" / "gitman.yml").read_text())
+    assert locked["sources_locked"][0]["rev"] == leaf_repo.head.commit.hexsha
+
+
+def test_review_commit_declining_lock_offer_still_commits(unlocked_leaf_project: Path):
+    """Declining the lock offer must not block the commit -- 'leaf' just stays
+    unlocked, same as before."""
+    root = unlocked_leaf_project
+    (root / "deps" / "sub" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    # sub's turn: c (commit) -> n (decline lock) -> confirm blank(yes) -> message
+    # blank(default); root's turn: s (skip)
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\nn\n\n\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "1 unlocked (leaf)" in result.output
+    assert "Relocked gitman.yml" not in result.output
+    assert "Committed" in result.output
+
+    sub_repo = Repo(root / "deps" / "sub")
+    assert not sub_repo.is_dirty(untracked_files=True)
+    locked = yaml.safe_load((root / "deps" / "sub" / "gitman.yml").read_text())
+    assert "sources_locked" not in locked
+
+
+def test_review_commit_no_lock_offer_when_dep_already_locked(locked_leaf_project: Path):
+    """'sub's dep on 'leaf' is already locked (and matching) in locked_leaf_project --
+    committing some other change in 'sub' must not offer to lock anything."""
+    root = locked_leaf_project
+    (root / "deps" / "sub" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\n\n\ns\n")
+    assert result.exit_code == 0, result.output
+    assert "needing a lock" not in result.output
+
+
+def test_review_commit_offers_to_lock_stale_deps_too(subproject_project: Path):
+    """A dep that's locked but stale (not just plain-unlocked) must also trigger
+    the pre-commit lock offer on a plain 'c', not just via the separate top-level
+    'u' action."""
+    root = subproject_project
+    (root / "deps" / "sub" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    # sub's turn: c (commit) -> y (confirm lock) -> confirm blank(yes) -> message blank(default)
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\ny\n\n\n")
+    assert result.exit_code == 0, result.output
+    assert "1 stale (leaf)" in result.output
+    assert "Relocked gitman.yml" in result.output
+    assert "Committed" in result.output
+
+    sub_repo = Repo(root / "deps" / "sub")
+    assert not sub_repo.is_dirty(untracked_files=True)
+    leaf_repo = Repo(root / "deps" / "sub" / "deps" / "leaf")
+    locked = yaml.safe_load((root / "deps" / "sub" / "gitman.yml").read_text())
+    assert locked["sources_locked"][0]["rev"] == leaf_repo.head.commit.hexsha
+
+
+def test_review_commit_combines_unlocked_and_stale_into_one_prompt(mixed_lock_project: Path):
+    """A repo with both an unlocked dep and a stale dep gets one combined
+    prompt/relock, not two separate ones."""
+    root = mixed_lock_project
+    (root / "deps" / "sub" / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\ny\n\n\n")
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Run 'gitman lock'") == 1
+    assert "1 unlocked (leaf_a)" in result.output
+    assert "1 stale (leaf_b)" in result.output
+    assert "Relocked gitman.yml" in result.output
+
+    locked = yaml.safe_load((root / "deps" / "sub" / "gitman.yml").read_text())
+    names_locked = {d["name"] for d in locked["sources_locked"]}
+    assert names_locked == {"leaf_a", "leaf_b"}
+
+
+def test_review_commit_no_warning_for_repo_not_used_by_any_config(tmp_path: Path):
+    """A standalone repo that no gitman.yml references at all must never trigger
+    the consuming-config-stale warning."""
+    root = tmp_path / "standalone"
+    _init_repo(root)
+    (root / "README.md").write_text("changed\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "review"], input="c\n\n\n")
+    assert result.exit_code == 0, result.output
+    assert "out of sync with the lock" not in result.output
 
 
 def test_cli_list_runs_against_scanned_project(project: Path):
@@ -330,10 +605,11 @@ def test_review_reports_clean_when_no_changes(project: Path):
 def test_review_commit_commits_dirty_repo(project: Path):
     (project / "README.md").write_text("changed\n")
     runner = CliRunner()
-    # c (commit) -> confirm file list (blank = yes) -> commit message (blank = default)
-    # (project fixture has no 'origin' remote, so the post-commit push attempt
-    # just prints an error and consumes no further input)
-    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n")
+    # c (commit) -> decline the unlocked-dep lock offer (blank = no, root's gitman.yml
+    # declares 'widget' with no lock) -> confirm file list (blank = yes) -> commit
+    # message (blank = default) (project fixture has no 'origin' remote, so the
+    # post-commit push attempt just prints an error and consumes no further input)
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n\n")
     assert result.exit_code == 0, result.output
     assert "About to commit:" in result.output
     assert "Committed ." in result.output
@@ -366,7 +642,8 @@ def test_review_commit_survives_failing_post_commit_hook(project: Path, monkeypa
 
     (project / "README.md").write_text("changed\n")
     runner = CliRunner()
-    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n")
+    # c (commit) -> decline the unlocked-dep lock offer -> confirm -> message
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\n\n\n")
     assert result.exit_code == 0, result.output
     assert "post-commit hook failed" in result.output
     assert "Committed ." in result.output
@@ -377,8 +654,8 @@ def test_review_commit_shows_new_files_and_can_be_cancelled(project: Path):
     (project / "README.md").write_text("changed\n")
     (project / "brand_new.txt").write_text("new stuff\n")
     runner = CliRunner()
-    # c (commit) -> decline the confirm
-    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\nn\n")
+    # c (commit) -> decline the unlocked-dep lock offer -> decline the commit confirm
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="c\n\nn\n")
     assert result.exit_code == 0, result.output
     assert "new/untracked file" in result.output
     assert "brand_new.txt" in result.output
@@ -430,10 +707,11 @@ def test_review_shows_file_list_not_full_diff_by_default(project: Path):
 def test_review_diff_then_commit(project: Path):
     (project / "README.md").write_text("changed\n")
     runner = CliRunner()
-    # d (diff) -> blank (all files) -> c (commit) -> confirm blank -> message blank
-    # (project fixture has no 'origin' remote, so the post-commit push attempt
-    # just prints an error and consumes no further input)
-    result = runner.invoke(cli, ["--root", str(project), "review"], input="d\n\nc\n\n\n")
+    # d (diff) -> blank (all files) -> c (commit) -> decline the unlocked-dep lock
+    # offer -> confirm blank -> message blank (project fixture has no 'origin'
+    # remote, so the post-commit push attempt just prints an error and consumes
+    # no further input)
+    result = runner.invoke(cli, ["--root", str(project), "review"], input="d\n\nc\n\n\n\n")
     assert result.exit_code == 0, result.output
     assert "diff --git" in result.output
     assert "Committed ." in result.output
@@ -456,7 +734,8 @@ def test_review_use_cache_skips_rescan(project: Path):
     assert pre.exit_code == 0, pre.output
     assert (project / ".cache_git_repos.yaml").exists()
 
-    result = runner.invoke(cli, ["--root", str(project), "review", "-c"], input="c\n\n\n")
+    # c (commit) -> decline the unlocked-dep lock offer -> confirm -> message
+    result = runner.invoke(cli, ["--root", str(project), "review", "-c"], input="c\n\n\n\n")
     assert result.exit_code == 0, result.output
     assert "Loaded cached git status" in result.output
     assert "Committed ." in result.output

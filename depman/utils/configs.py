@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import time
 from functools import wraps
-import click
+import typer
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from depman import CONFIG_NAME, CACHE_GIT_REPOS, CACHE_CONFIGS
@@ -77,7 +77,7 @@ def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, An
                 entry["backend"] = backend.name
                 configs[entry["project_root"]] = entry
             except Exception as e:
-                click.echo(click.style(f"Error loading {config_path}: {e}", fg="red"), err=True)
+                typer.echo(typer.style(f"Error loading {config_path}: {e}", fg="red"), err=True)
 
     res = {
         "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -304,7 +304,7 @@ def find_all_git_repos(root: Path, jobs: int = 8) -> Dict[str, Any]:
             try:
                 key, data = future.result()
             except Exception as e:
-                click.echo(click.style(f"  {repo_path}: Error ({e})", fg="red"), err=True)
+                typer.echo(typer.style(f"  {repo_path}: Error ({e})", fg="red"), err=True)
                 continue
             repos[key] = data
     res = {
@@ -364,7 +364,7 @@ def print_check_table(
 
     has_updates = False
     updates_projects = []
-    click.echo(click.style(
+    typer.echo(typer.style(
         f"\n=== Git Repos Status (scanned at {git_repos['datetime']}) ===", bold=True))
 
     ordered_keys = _full_repo_order(configs, git_repos["repos"].keys())
@@ -373,20 +373,20 @@ def print_check_table(
         has_updates_repo = val["has_uncommitted"] or val["has_unpushed"] or val["has_update"] or val["has_update_main"]
 
         if val["has_uncommitted"]:
-            click.echo(click.style(
+            typer.echo(typer.style(
                 f"⚠️  Repo {key} has uncommitted changes: {val['uncommitted_files']}", fg="yellow"))
             has_updates_repo = True
         if val["has_unpushed"]:
-            click.echo(click.style(
+            typer.echo(typer.style(
                 f"⚠️  Repo {key} has {val['unpushed_count']} unpushed commits", fg="yellow"))
         if val["has_update"]:
             details = val["update_details"]
-            click.echo(click.style(
+            typer.echo(typer.style(
                 f"⚠️  Repo {key} has updates on {details['branch']}@{details['latest_hash'][:7]}:{details.get('datetime')} - {details['message']}", fg="yellow"))
             updates_projects.append(key)
         if val["has_update_main"]:
             details = val["update_details_main"]
-            click.echo(click.style(
+            typer.echo(typer.style(
                 f"⚠️  Repo {key} has updates on main branch {details['branch']}: {details['latest_hash'][:7]} - {details['message']}", fg="yellow"))
 
         has_updates = has_updates or has_updates_repo
@@ -411,25 +411,25 @@ def print_check_table(
     console = Console()
     console.print(table)
     if list_mode:
-        click.echo(click.style(
+        typer.echo(typer.style(
             "select #:", fg="green"))
-        # c = click.getchar(echo=True)
-        #     click.echo("Enter a string: ")
+        # c = typer.getchar(echo=True)
+        #     typer.echo("Enter a string: ")
         # Standard Python input() reads a full line as a string
         c = input()
-        click.echo(f"You entered: {c}")
-        click.echo()
+        typer.echo(f"You entered: {c}")
+        typer.echo()
         if c.isdigit():
             idx_sel = int(c)
             if idx_sel >=0 and idx_sel < len(ordered_keys):
                 repo_key = ordered_keys[idx_sel]
-                click.echo(click.style(
+                typer.echo(typer.style(
                     f"Details for repo {c} {repo_key}:", fg="green"))
                 repo_info = git_repos["repos"][repo_key]
-                click.echo(yaml.dump(repo_info, sort_keys=False))
+                typer.echo(yaml.dump(repo_info, sort_keys=False))
                 project_root = Path(root) / repo_key
                 command = f'cd {project_root} && git status'
-                click.echo(click.style(
+                typer.echo(typer.style(
                     f"cd {project_root}", fg="cyan"))
                 # os.chdir(project_root)
                 # os.system(f'cd {project_root}')
@@ -457,44 +457,44 @@ def print_check_table(
                     except Exception:
                         print("Make sure Windows Terminal is installed")
             else:
-                click.echo(click.style(
+                typer.echo(typer.style(
                     f"Invalid selection: {c}", fg="red"))
         return
     
     if update_mode and has_updates:
-        click.echo(click.style(
+        typer.echo(typer.style(
             "⚠️  Updates available—run 'depman gm update' to apply.", fg="yellow"))
-        click.echo("\n".join(updates_projects))
-        click.echo('apply updates? [yn] ', nl=False)
-        c = click.getchar()
-        click.echo()
+        typer.echo("\n".join(updates_projects))
+        typer.echo('apply updates? [yn] ', nl=False)
+        c = typer.getchar()
+        typer.echo()
         if c == 'y':
-            click.echo('apply updates')
+            typer.echo('apply updates')
             # gitman_update(*updates_projects,root=root)
             # gitman_update(root=root)
             for p in updates_projects:
-                click.echo(click.style(f"apply update for {p}? [y/enter/n] ", fg="yellow"))
+                typer.echo(typer.style(f"apply update for {p}? [y/enter/n] ", fg="yellow"))
                 print("Current commit info:")
                 print(git_repos['repos'][p]['commit_info']['datetime'], "|", git_repos['repos'][p]['commit_info']['message'])
                 print("Update details:")
                 print(git_repos['repos'][p]['update_details']['datetime'], "|", git_repos['repos'][p]['update_details']['message'])
-                c = click.getchar()
-                click.echo()
+                c = typer.getchar()
+                typer.echo()
                 if (c == 'y' or c == '\n'):
                     full_p=Path(root,p)
                     conf_name = find_dep_config_name(configs, p)
                     if conf_name:
                         print(f'Updating {p} in config {conf_name}')
                         gitman_update(conf_name,root=root)
-                        click.echo(click.style(f"Updated {p}", fg="green"))
+                        typer.echo(typer.style(f"Updated {p}", fg="green"))
                     else:
-                        click.echo(click.style(f"Skipped {p} (not in any config)", fg="red"))
+                        typer.echo(typer.style(f"Skipped {p} (not in any config)", fg="red"))
                 else:
-                    click.echo(f'Skipped {p}')
+                    typer.echo(f'Skipped {p}')
         elif c == 'n':
-            click.echo('Abort!')
+            typer.echo('Abort!')
         else:
-            click.echo('Invalid input :(')
+            typer.echo('Invalid input :(')
 
 
 def find_dep_config_name(configs: Dict[str, Any], dep_path: str) -> Optional[str]:
@@ -510,7 +510,7 @@ def print_list_configs_repos(
     configs: Dict[str, Any], repos: Dict[str, Any],only_dirty: bool=False, list_mode = False
 ):
     """print configs and repos summary."""
-    click.echo("\nRepos Summary:")
+    typer.echo("\nRepos Summary:")
     print(f"Total repos: {len(repos.get('repos', {}))}")
     print(f"snapshot datetime: {repos.get('datetime', {})}")
     is_total_ok = True
@@ -544,28 +544,28 @@ def print_list_configs_repos(
         sym =  "✅" if is_all_ok else "⚠️"
         
         
-        click.echo(f"{sym}  repo: {repo_path}        branch@rev: {repo_info.get('current_branch')}@{repo_info.get('rev_short')}")
-        click.echo(f"       datetime: {repo_info.get('commit_info')['datetime']} | message: {repo_info.get('commit_info')['message']}")
+        typer.echo(f"{sym}  repo: {repo_path}        branch@rev: {repo_info.get('current_branch')}@{repo_info.get('rev_short')}")
+        typer.echo(f"       datetime: {repo_info.get('commit_info')['datetime']} | message: {repo_info.get('commit_info')['message']}")
         if has_updates_repo:
             if repo_info.get('has_uncommitted'):
-                click.echo(click.style(f"         | Has Uncommitted Changes: {repo_info.get('has_uncommitted')} | Files: {', '.join(repo_info.get('uncommitted_files', []))}",fg='bright_yellow'))
+                typer.echo(typer.style(f"         | Has Uncommitted Changes: {repo_info.get('has_uncommitted')} | Files: {', '.join(repo_info.get('uncommitted_files', []))}",fg='bright_yellow'))
             if repo_info.get('has_unpushed'):
-                click.echo(click.style(f"         | Has Unpushed Commits: {repo_info.get('has_unpushed')} | Count: {repo_info.get('unpushed_count')}",fg='bright_yellow'))
+                typer.echo(typer.style(f"         | Has Unpushed Commits: {repo_info.get('has_unpushed')} | Count: {repo_info.get('unpushed_count')}",fg='bright_yellow'))
             if repo_info.get('has_update'):
-                click.echo(click.style(f"         | Update Available: {repo_info.get('has_update')}",fg='yellow'))
-            # click.echo(click.style(f"         | Has Update: {repo_info.get('has_update')} | Uncommitted: {repo_info.get('has_uncommitted')} | Unpushed: {repo_info.get('has_unpushed')}",fg=msg_upd_style))
+                typer.echo(typer.style(f"         | Update Available: {repo_info.get('has_update')}",fg='yellow'))
+            # typer.echo(typer.style(f"         | Has Update: {repo_info.get('has_update')} | Uncommitted: {repo_info.get('has_uncommitted')} | Unpushed: {repo_info.get('has_unpushed')}",fg=msg_upd_style))
             if repo_info.get('has_update') and repo_info.get('update_details'):
                 ud = repo_info.get('update_details')
-                click.echo(f"         | Update Details: Branch: {ud.get('branch')} | Latest Hash: {ud.get('latest_hash')[:7]} | Datetime: {ud.get('datetime')} | Message: {ud.get('message')}")
+                typer.echo(f"         | Update Details: Branch: {ud.get('branch')} | Latest Hash: {ud.get('latest_hash')[:7]} | Datetime: {ud.get('datetime')} | Message: {ud.get('message')}")
         if (not is_rev_matched or not only_dirty):
-            click.echo(click.style(f"       configs: {repo_info.get('used_in_configs')}",fg=conf_style))
-            click.echo()
+            typer.echo(typer.style(f"       configs: {repo_info.get('used_in_configs')}",fg=conf_style))
+            typer.echo()
 
     uninstalled_configs = find_uninstalled_configs(configs.get("configs", {}))
     if uninstalled_configs:
-        click.echo("⚠️ Configs without installations:")
+        typer.echo("⚠️ Configs without installations:")
         for uc in uninstalled_configs:
-            click.echo(click.style(f"  - {uc}", fg="yellow"))
+            typer.echo(typer.style(f"  - {uc}", fg="yellow"))
     is_total_ok = is_total_ok and (len(uninstalled_configs) == 0)
 
     behind_main_deps = [
@@ -575,13 +575,13 @@ def print_list_configs_repos(
         if dep_info.get("behind_main")
     ]
     if behind_main_deps:
-        click.echo("⚠️ Deps whose locked revision is behind origin/main:")
+        typer.echo("⚠️ Deps whose locked revision is behind origin/main:")
         for d in behind_main_deps:
-            click.echo(click.style(f"  - {d}", fg="yellow"))
+            typer.echo(typer.style(f"  - {d}", fg="yellow"))
     is_total_ok = is_total_ok and (len(behind_main_deps) == 0)
 
     if is_total_ok:
-        click.echo(click.style("✅ All repos are up-to-date, installed revisions matching configs.", fg="green"))
+        typer.echo(typer.style("✅ All repos are up-to-date, installed revisions matching configs.", fg="green"))
 
 
 @timeit
@@ -671,26 +671,26 @@ def get_cached_configs(root, CACHE_GIT_REPOS, CACHE_CONFIGS):
 def print_project_tree(config: Config, root_path: Path, prefix: str = ""):
     """Print ASCII tree of project deps (requirements + groups)."""
     location = config.content.get("location", "requirements")
-    click.echo(f"{prefix}├── Location: {location}")
+    typer.echo(f"{prefix}├── Location: {location}")
     
     def _print_node(items: List[Dict], node_prefix: str = "│   ", is_last: bool = True):
         for i, req in enumerate(items):
             is_last_item = i == len(items) - 1
             conn = "└── " if is_last_item else "├── "
-            click.echo(f"{node_prefix}{conn}{req.get('name', Path(req['repo']).name)} ({req['rev']})")
+            typer.echo(f"{node_prefix}{conn}{req.get('name', Path(req['repo']).name)} ({req['rev']})")
             if is_last_item:
                 node_prefix = "    "
     
     # Requirements
     if config.requirements:
-        click.echo(f"{prefix}├── Requirements:")
+        typer.echo(f"{prefix}├── Requirements:")
         _print_node(config.requirements, prefix="│   ", is_last=False)
     
     # Groups
     for group_name, group_reqs in config.groups.items():
         is_last_group = group_name == list(config.groups.keys())[-1]
         conn = "└── " if is_last_group else "├── "
-        click.echo(f"{prefix}{conn}Group: {group_name}")
+        typer.echo(f"{prefix}{conn}Group: {group_name}")
         _print_node(group_reqs, prefix=prefix + ("    " if is_last_group else "│   "))
 
 
