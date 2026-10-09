@@ -16,6 +16,7 @@ from .commands.gm_commands import gm_app, gm_lock
 from .commands.checker import check_cmd, list_cmd, CONTEXT_SETTINGS as CHECKER_CONTEXT_SETTINGS
 from .commands.review import review_cmd, CONTEXT_SETTINGS as REVIEW_CONTEXT_SETTINGS
 from .commands.hooks import hooks_app
+from .commands.release import release_cmd, CONTEXT_SETTINGS as RELEASE_CONTEXT_SETTINGS
 from .utils.configs import find_git_root
 
 
@@ -42,6 +43,7 @@ app.command("lock", help="Lock dependencies (alias of `gm lock`).")(gm_lock)
 app.command("check", context_settings=CHECKER_CONTEXT_SETTINGS)(check_cmd)
 app.command("list", context_settings=CHECKER_CONTEXT_SETTINGS)(list_cmd)
 app.command("review", context_settings=REVIEW_CONTEXT_SETTINGS)(review_cmd)
+app.command("release", context_settings=RELEASE_CONTEXT_SETTINGS)(release_cmd)
 app.add_typer(hooks_app)
 
 # Exposed as an ordinary click.Group so the `depman = "depman.cli:cli"` entry point

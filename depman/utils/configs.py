@@ -87,6 +87,16 @@ def find_all_configs(root: Path, repos_in: Dict[str, Any]) -> Tuple[Dict[str, An
     return res, repos_in
 
 
+def _untracked_files(repo: Repo) -> List[str]:
+    """
+    Untracked files in repo's working tree, excluding untracked entries that are
+    themselves git repos (e.g. a gitman dep checked out but not gitignored): those
+    are scanned as repos in their own right, not as changes to their parent.
+    """
+    work_dir = Path(repo.working_tree_dir)
+    return [f for f in repo.untracked_files if not (work_dir / f / ".git").exists()]
+
+
 def local_repo_issues(repo: Repo) -> Dict[str, Any]:
     """
     Fast, local-only status check: no network fetch. Unpushed-commit detection
@@ -98,10 +108,11 @@ def local_repo_issues(repo: Repo) -> Dict[str, Any]:
     Returns: {'has_uncommitted': bool, 'uncommitted_files': List[str],
               'has_unpushed': bool, 'unpushed_count': int}
     """
-    has_uncommitted = repo.is_dirty()
+    untracked = _untracked_files(repo)
+    has_uncommitted = repo.is_dirty() or bool(untracked)
     uncommitted_files: List[str] = []
     if has_uncommitted:
-        uncommitted_files.extend(repo.untracked_files)
+        uncommitted_files.extend(untracked)
         uncommitted_files.extend([diff.a_path for diff in repo.index.diff(None)])
         uncommitted_files.extend([diff.a_path for diff in repo.index.diff("HEAD")])
 
@@ -233,10 +244,11 @@ def _scan_one_repo(repo_path: Path, root: Path) -> Tuple[str, Dict[str, Any]]:
         update_details_main = update_details
 
     # Uncommitted changes (works in detached)
-    has_uncommitted = repo.is_dirty()
+    untracked = _untracked_files(repo)
+    has_uncommitted = repo.is_dirty() or bool(untracked)
     uncommitted_files = []
     if has_uncommitted:
-        uncommitted_files.extend(repo.untracked_files)
+        uncommitted_files.extend(untracked)
         uncommitted_files.extend([diff.a_path for diff in repo.index.diff(None)])
         uncommitted_files.extend([diff.a_path for diff in repo.index.diff("HEAD")])
 

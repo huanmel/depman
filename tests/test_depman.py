@@ -33,6 +33,14 @@ def _init_repo(path: Path) -> Repo:
     return repo
 
 
+def _commit_root_config(root: Path) -> None:
+    """Commit the root gitman.yml so the root repo starts out clean (nested dep repos
+    stay untracked, which depman doesn't count as the parent being dirty)."""
+    repo = Repo(root)
+    repo.git.add("gitman.yml")
+    repo.git.commit("-m", "add gitman.yml")
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     """A root git repo with one nested dep repo tracked by a root gitman.yml."""
@@ -50,6 +58,7 @@ def project(tmp_path: Path) -> Path:
     }
     (root / "gitman.yml").write_text(yaml.safe_dump(gitman_yml))
 
+    _commit_root_config(root)
     return root
 
 
@@ -98,6 +107,7 @@ def subproject_project(tmp_path: Path) -> Path:
     sub_repo.git.add(A=True)
     sub_repo.git.commit("-m", "add gitman.yml with a stale lock for leaf")
 
+    _commit_root_config(root)
     return root
 
 
@@ -135,6 +145,7 @@ def locked_leaf_project(tmp_path: Path) -> Path:
     sub_repo.git.add(A=True)
     sub_repo.git.commit("-m", "add gitman.yml locked to leaf's current rev")
 
+    _commit_root_config(root)
     return root
 
 
@@ -168,6 +179,7 @@ def unlocked_leaf_project(tmp_path: Path) -> Path:
     sub_repo.git.add(A=True)
     sub_repo.git.commit("-m", "add gitman.yml, never locked")
 
+    _commit_root_config(root)
     return root
 
 
@@ -209,6 +221,7 @@ def mixed_lock_project(tmp_path: Path) -> Path:
     sub_repo.git.add(A=True)
     sub_repo.git.commit("-m", "add gitman.yml: leaf_a unlocked, leaf_b stale")
 
+    _commit_root_config(root)
     return root
 
 
@@ -243,6 +256,7 @@ def nested_order_project(tmp_path: Path) -> Path:
         ],
     }))
 
+    _commit_root_config(root)
     return root
 
 
@@ -1110,3 +1124,13 @@ def test_hooks_check_silent_when_clean(project: Path):
     # stdout is the meaningful channel here; diagnostic noise (e.g. find_all_configs's
     # @timeit) is expected on stderr and mixed into .output, so check stdout alone.
     assert result.stdout.strip() == ""
+
+
+def test_untracked_file_in_repo_counts_as_uncommitted(project: Path):
+    (project / "deps" / "widget" / "new_file.txt").write_text("new\n")
+    repos = find_all_git_repos(project)["repos"]
+    assert repos[_dep_key()]["has_uncommitted"] is True
+    assert "new_file.txt" in repos[_dep_key()]["uncommitted_files"]
+    assert local_repo_issues(Repo(project / "deps" / "widget"))["has_uncommitted"] is True
+    # the nested dep repo itself (untracked in root) must not make root dirty
+    assert repos["."]["has_uncommitted"] is False
