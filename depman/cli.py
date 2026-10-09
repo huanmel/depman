@@ -12,7 +12,7 @@ import click
 import typer
 from pathlib import Path
 from typing import Optional
-from .commands.gm_commands import gm_app
+from .commands.gm_commands import gm_app, gm_lock
 from .commands.checker import check_cmd, list_cmd, CONTEXT_SETTINGS as CHECKER_CONTEXT_SETTINGS
 from .commands.review import review_cmd, CONTEXT_SETTINGS as REVIEW_CONTEXT_SETTINGS
 from .commands.hooks import hooks_app
@@ -38,6 +38,7 @@ def main(ctx: typer.Context, root: Optional[str] = typer.Option(None, "--root", 
 
 
 app.add_typer(gm_app)
+app.command("lock", help="Lock dependencies (alias of `gm lock`).")(gm_lock)
 app.command("check", context_settings=CHECKER_CONTEXT_SETTINGS)(check_cmd)
 app.command("list", context_settings=CHECKER_CONTEXT_SETTINGS)(list_cmd)
 app.command("review", context_settings=REVIEW_CONTEXT_SETTINGS)(review_cmd)
